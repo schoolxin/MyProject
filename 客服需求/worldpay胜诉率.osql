@@ -1,0 +1,82 @@
+--name:worldpay胜诉率
+--author:OrderPlus
+--create time:2021-08-23 10:21
+-- 以最开始的一笔拒付交易开始算   多次拒付算一次拒付
+--drop table tmp_worldpay_won_info;
+
+@worldpay_chargeback_info:=
+select
+   a.trans_date
+  ,a.payment_method
+  ,a.merchant_code
+  ,a.transaction_code
+  ,a.currency_code
+  ,a.amount
+  ,a.status as chargerback_stage
+  ,row_number() over (partition by a.transaction_code order by a.trans_date asc) as rn
+from ods_looklook_mongodb_worldpay_info a
+where a.pt = '${date}' and a.status in ('INFORMATION_REQUESTED','INFORMATION_SUPPLIED','CHARGED_BACK','CHARGEBACK_REVERSED')
+;
+
+@worldpay_chargeback_info2:=
+select
+   a.trans_date
+  ,a.payment_method
+  ,a.merchant_code
+  ,a.transaction_code
+  ,a.currency_code
+  ,a.amount
+  ,a.status as chargerback_stage
+  ,row_number() over (partition by a.transaction_code order by a.trans_date desc) as rn
+from ods_looklook_mongodb_worldpay_info a
+where a.pt = '${date}' and a.status in ('INFORMATION_REQUESTED','INFORMATION_SUPPLIED','CHARGED_BACK','CHARGEBACK_REVERSED')
+;
+
+@won_trans:=
+select
+ t.transaction_code
+from
+(
+  select
+    a.*
+  from @worldpay_chargeback_info2 a
+  where a.rn = 1
+) t
+where t.chargerback_stage = 'CHARGEBACK_REVERSED'
+;
+
+create table tmp_worldpay_won_info as
+select
+ a.transaction_code,
+ a.merchant_code,
+ a.chargeback_reason,
+ a.trans_date,
+ case when b.transaction_code is not null then '1' else '0' end if_won
+from
+(
+  select
+    a.transaction_code,
+    a.merchant_code,
+    a.payment_method,
+    b.chargeback_description as chargeback_reason,
+    a.trans_date
+  from @worldpay_chargeback_info a
+  left join (
+    select
+       order_code
+      ,chargeback_code
+      ,chargeback_description
+      ,journal_type
+      ,split(a.acquirer_reference,' / ')[1] as acquirer_reference
+      ,row_number() over(distribute by order_code sort by a.chargeback_date,nvl(a.chargeback_description,'|') asc) as rn
+    from ods_looklook_mongodb_worldpay_chargeback_info a
+    where pt=max_pt('ods_looklook_mongodb_worldpay_chargeback_info') and a.chargeback_description is not null
+
+  ) b
+  on a.transaction_code=b.order_code and b.rn=1
+  where a.rn =1
+) a
+left join @won_trans b
+on (a.transaction_code = b.transaction_code)
+where to_char(a.trans_date,'yyyymmdd') between '20210101' and '20210531'
+;

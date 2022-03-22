@@ -1,0 +1,52 @@
+--name:wd_多次拒付
+--author:order
+--create time:2021-10-09 10:13
+
+
+--select t.status from ods_looklook_mongodb_worldpay_info t where t.pt = '${date}' group by t.status;
+
+
+-- CHARGEBACK_REVERSED  CHARGED_BACK   INFORMATION_REQUESTED  INFORMATION_SUPPLIED
+@datas:=
+select
+ t.trans_date,
+ t.transaction_code
+from
+(
+    select
+     t.transaction_code,
+     t.trans_date,
+     row_number() over (partition by t.transaction_code order by t.trans_date asc) as rn
+  from ods_looklook_mongodb_worldpay_info t
+  where t.pt = '${date}' and t.status in ('CHARGEBACK_REVERSED','CHARGED_BACK','INFORMATION_REQUESTED','INFORMATION_SUPPLIED')
+) t
+where t.rn = 1
+;
+
+
+@3_month_chargeback:=
+select
+*
+from @datas a
+where to_char(a.trans_date,'yyyymm') in ('202107','202108','202109')
+;
+
+@final_data:=
+select
+ b.status,
+ b.transaction_code,
+ to_char(a.trans_date,'yyyymm') as data_month,
+ count(1) as status_cnt
+from @3_month_chargeback a
+inner join (select * from ods_looklook_mongodb_worldpay_info b where b.pt = '${date}' and b.status in ('CHARGEBACK_REVERSED','CHARGED_BACK','INFORMATION_REQUESTED','INFORMATION_SUPPLIED')) b
+on (a.transaction_code = b.transaction_code)
+group by b.status,b.transaction_code,to_char(a.trans_date,'yyyymm')
+having count(1)>1
+;
+
+
+select
+  a.transaction_code,max(a.status_cnt) as status_cnt,a.data_month
+from @final_data a
+group by a.transaction_code,a.data_month
+;

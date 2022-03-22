@@ -1,0 +1,89 @@
+@paypal_trans_info:=
+select
+  a.paypal_shop_account,
+  a.transaction_id,
+  b.order_id,
+  b.site_id,
+  b.site_name,
+  b.site_type,
+  d.erp_order_id,
+  a.transaction_amount_value as transaction_amount,
+  a.transaction_amount_curreny_code as currency_code
+from ods_looklook_mongodb_paypal_transaction_info a
+left join dwd_mapping_txn_order_site b
+on (a.transaction_id = b.txn_id and b.pt = '${date}' and b.pay_type = 'paypal')
+left join dwd_mapping_erp_order_id d
+on (b.order_id = d.site_order_id and d.pt = '${date}')
+where a.pt= '${date}'
+and lower(a.paypal_shop_account) in ('innerwiki@163.com')
+and a.transaction_event_code in ('T0000','T0006','T0011') and a.transaction_amount_value>0 and to_char(a.transaction_date,'yyyymm') in ('202110','202111','202112')
+;
+
+--发货数据
+@site_delivery_info_oms:=
+select
+   nvl(t.erp_order_id,t.order_id) as erp_order_id
+  ,to_char(lps.deliverytime,'yyyymmdd') as delivery_date
+  ,lps.expressno
+  ,lps.company_name
+  ,lps.country
+from opdc.dw_logistics_package_shipments lps --opdc 网红订单在erp中创建的  该表中新数据没有网红订单 所以无需过滤
+inner join (select t.order_id,t.erp_order_id from opdc.dwd_order_sales_process t group by t.order_id,t.erp_order_id) t
+on (lps.order_id = nvl(t.order_id,t.erp_order_id))
+where to_char(lps.deliverytime,'yyyymmdd')>='20211001'
+and lps.deliverystatus != '清关退回'
+group by
+   nvl(t.erp_order_id,t.order_id)
+  ,to_char(lps.deliverytime,'yyyymmdd')
+  ,lps.expressno
+  ,lps.company_name
+  ,lps.country
+union all
+select
+   nvl(t.erp_order_id,t.order_id) as erp_order_id
+  ,to_char(lps.deliverytime,'yyyymmdd') as delivery_date
+  ,lps.expressno
+  ,lps.company_name
+  ,lps.country
+from popopiedc.dw_logistics_package_shipments lps
+inner join (select t.order_id,t.erp_order_id from popopiedc.dwd_order_sales_process t group by t.order_id,t.erp_order_id) t
+on (lps.order_id = nvl(t.order_id,t.erp_order_id))
+where to_char(lps.deliverytime,'yyyymmdd')>='20211001'
+and lps.deliverystatus != '清关退回'
+group by
+   nvl(t.erp_order_id,t.order_id)
+  ,to_char(lps.deliverytime,'yyyymmdd')
+  ,lps.expressno
+  ,lps.company_name
+  ,lps.country
+;
+
+
+create table tmp_delivery_innerwiki
+as
+select
+  distinct
+  ti.transaction_id
+ ,ti.transaction_amount
+ ,ti.currency_code
+ ,ti.erp_order_id
+ ,nvl(io.expressno,'') as expressno
+ ,nvl(io.delivery_date,'') as delivery_date
+ ,io.company_name
+ ,io.country
+from @paypal_trans_info ti
+left join @site_delivery_info_oms io
+on (ti.erp_order_id = io.erp_order_id)
+;
+
+--
+--
+--select substring(t.trans_date,1,6) as data_month,t.shop_account,sum(t.payments_received*cct.currency_transform) as payments_received_usd
+--from app_looklook_daily_paypal_trans_info t
+--inner join dwd_com_currency_transform cct
+--on (t.trans_date = cct.data_dt and t.currency_code = cct.currency_code and cct.pt = '${date}')
+--where t.trans_date between '20211001' and '20211231' and t.pt = '${date}' group by substring(t.trans_date,1,6),t.shop_account
+--having payments_received_usd>=290000;
+
+
+select * from dwd_looklook_allsitetype_order_info tt where tt.order_sn = '1013211207228' and tt.pt = '${date}';

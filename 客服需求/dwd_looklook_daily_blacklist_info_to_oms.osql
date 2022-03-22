@@ -1,0 +1,302 @@
+--name:app_looklook_daily_chargeback_order_info
+--author:OrderPlus
+--create time:2019-11-16 10:15
+--name:app_looklook_daily_chargeback_order_info
+--author:OrderPlus
+--create time:2019-11-16 10:15
+@shop_erp_mapping:=
+select
+     a.site_type,
+     a.site_order_id,
+     a.erp_order_id,
+     a.erp_site_id,
+     a.site_id
+from dwd_mapping_erp_order_id a
+where a.pt = '${date}';
+
+
+@allsite_order_info:=
+select
+     distinct
+     a.id as order_id,
+     "shopify" as site_type,
+     a.shipping_customer_email as customer_email,
+     a.shipping_customer_phone as customer_phone,
+     a.order_date,
+     a.site_id,
+     a.site_name,
+     b.erp_site_id,
+     b.erp_order_id,
+     c.browser_ip as ip,
+     substring(replace(a.txn_at,'-',''),1,8) as pay_date,
+     a.order_id as order_no
+from dwd_looklook_shopify_order_info a
+inner join ods_looklook_mongodb_shopify_order c
+on (a.id = c.id and c.pt = '${date}')
+left join @shop_erp_mapping b
+on (a.id = b.site_order_id and a.site_id = b.site_id and b.site_type = 'shopify')
+where a.pt='${date}'
+union all
+select distinct
+      to_char(a.id) as order_id,
+      "cloud" as site_type,
+      a.shipping_customer_email as customer_email,
+      a.shipping_customer_phone as customer_phone,
+      a.order_date,
+      a.site_id,
+      a.site_name,
+      b.erp_site_id,
+      b.erp_order_id,
+      c.ip_addr as ip,
+      substring(replace(a.txn_at,'-',''),1,8) as pay_date,
+      a.order_no
+from dwd_looklook_cloud_order_info a
+inner join orderplus_HK.ods_cloud_orderplus_db_tb_order c
+on (a.id = c.id and c.pt = '${date}')
+left join @shop_erp_mapping b
+on (to_char(a.id) = b.site_order_id and b.site_type = 'cloud' and a.site_id = b.site_id)
+where a.pt='${date}'
+union all
+select distinct
+     a.order_sn as order_id,
+     "spsite" as site_type,
+     a.shipping_customer_email as customer_email,
+     a.shipping_customer_phone as customer_phone,
+     a.order_date,
+     a.site_id,
+     a.site_name,
+     b.erp_site_id,
+     b.erp_order_id,
+     a.ip as ip,
+     to_char(a.payment_date,'yyyymmdd') as pay_date,
+     a.order_sn as order_no
+from dwd_looklook_spsite_order_info a
+left join @shop_erp_mapping b
+on (a.order_sn = b.site_order_id and b.site_type = 'spsite' and a.site_id = b.site_id)
+where a.pt='${date}'
+union all
+select distinct
+     a.id as order_id,
+     "shoplazza" as site_type,
+     a.shipping_customer_email as customer_email,
+     a.shipping_customer_phone as customer_phone,
+     a.order_date,
+     a.site_id,
+     a.site_name,
+     b.erp_site_id,
+     b.erp_order_id,
+     '' as ip,
+     substring(replace(a.txn_at,'-',''),1,8) as pay_date,
+     a.order_id as order_no
+from dwd_looklook_shoplazza_order_info a
+left join @shop_erp_mapping b
+on (a.id = b.site_order_id and b.site_type = 'shoplazza' and a.site_id = b.site_id)
+where a.pt='${date}'
+-- Mshop
+union all
+select distinct
+     to_char(a.id) as order_id,
+     "Mshop" as site_type,
+     nvl(a.shipping_customer_email,a.default_customer_email) as customer_email,
+     nvl(a.shipping_customer_phone,a.default_customer_phone) as customer_phone,
+     a.order_date,
+     a.site_id,
+     a.site_name,
+     b.erp_site_id,
+     b.erp_order_id,
+     '' as ip,
+     substring(replace(a.txn_at,'-',''),1,8) as pay_date,
+     a.order_no
+from dwd_looklook_self_site_order_info a
+left join @shop_erp_mapping b
+on (a.id = b.site_order_id and b.site_type = 'Mshop' and a.site_id = b.site_id)
+where a.pt='${date}'
+union all
+select distinct
+     a.id as order_id,
+     "woocommerce" as site_type,
+     nvl(a.shipping_customer_email,a.default_customer_email) as customer_email,
+     nvl(a.shipping_customer_phone,a.default_customer_phone) as customer_phone,
+     a.order_date,
+     a.site_id,
+     a.site_name,
+     b.erp_site_id,
+     b.erp_order_id,
+     '' as ip,
+     substring(replace(a.txn_at,'-',''),1,8) as pay_date,
+     a.order_id as order_no
+from dwd_looklook_woocommerce_order_info a
+left join @shop_erp_mapping b
+on (a.id = b.site_order_id and b.site_type = 'woocommerce' and a.site_id = b.site_id)
+where a.pt='${date}'
+;
+
+--select * from @allsite_order_info a where a.order_id = '4018691375278';
+
+@allpay_info:=
+select
+ t.order_id,
+ t.site_id,
+ t.site_name,
+ t.pay_type,
+ t.card_number,
+ t.card_type,
+ t.chargeback_reason,
+ t.site_type,
+ t.reason_description,
+ t.journal_type
+from
+(
+  select
+       row_number() over (partition by a.order_id,a.site_id,a.payment_type order by a.trans_date desc) as rn,
+       a.order_id as order_id,
+       a.site_id,
+       a.site_name,
+       a.payment_type as pay_type,
+       '' as card_number,
+       a.card_type as card_type,
+       nvl(a.payment_reason_level2,a.chargeback_description) as chargeback_reason,
+       nvl(a.journal_type,a.chargeback_type) as journal_type,
+       a.chargeback_description as reason_description,
+       case site_type_id when 1 then 'shopify' when 2 then 'cloud' when 3 then 'spsite' when 4 then '单页面站' when 5 then 'spsite' when 12 then 'woocommerce' when 13 then 'Mshop' else 'other' end as site_type
+from app_looklook_fin_spu_chargeback_detail a
+where a.pt = '${date}' and a.chargeback_refunds_type = 'charge_back' and a.payment_type != 'worldpay'
+) t
+where t.rn =1
+union all
+select
+   t.order_id,
+   t.site_id,
+   t.site_name,
+   t.pay_type,
+   t.card_number,
+   t.card_type,
+   t.chargeback_reason,
+   t.site_type,
+   t.reason_description,
+   t.journal_type
+from
+(
+    select
+      t2.order_id,
+      t2.site_id as site_id,
+      t2.site_name as site_name,
+      'worldpay' as pay_type,
+      t4.cardnbr_ccnbr as card_number,
+      case when t1.payment_method rlike '^ECMC' then 'Master' when t1.payment_method rlike '^VISA' then 'Visa' else '' end as card_type,
+      nvl(b.reason_level_2,t4.chargeback_description) as chargeback_reason,
+      t2.site_type,
+      t1.status as journal_type,
+      t4.chargeback_description as reason_description,
+      row_number() over (partition by t2.order_id,t2.site_id order by t1.create_time desc) as rn
+  from ods_looklook_mongodb_worldpay_info t1
+  inner join dwd_mapping_txn_order_site t2
+  on t1.transaction_code=t2.txn_id and t2.pay_type='worldpay' and t2.pt='${date}'
+  left join (
+    select
+       order_code
+      ,chargeback_description
+      ,a.cardnbr_ccnbr
+      ,row_number() over(distribute by order_code sort by create_time desc) as rn
+    from ods_looklook_mongodb_worldpay_chargeback_info a
+    where pt=max_pt('ods_looklook_mongodb_worldpay_chargeback_info') and a.chargeback_description is not null and length(a.chargeback_description)>0
+  ) t4
+  on (t1.transaction_code=t4.order_code and t4.rn =1)
+  left join  (select distinct b.reason_attr,lower(b.reason_en) as reason_en,b.reason_level_1,b.reason_level_2,b.reason_type,b.chargeback_refunds_type from static_refunds_chargeback_reason_mapping b) b
+  on (replace(regexp_replace(lower(trim(t4.chargeback_description)),'\n|\t|\r',''),' ','') = replace(regexp_replace(lower(trim(b.reason_en)),'\n|\t|\r',''),' ','') and lower('worldpay') = lower(b.reason_type) and 'charge_back' = regexp_replace(b.chargeback_refunds_type,'\n|\t|\r','') and b.reason_type!='erp')
+  where t1.pt='${date}' and t1.status in ('CHARGED_BACK','INFORMATION_REQUESTED','INFORMATION_REQUESTED','INFORMATION_SUPPLIED','CHARGEBACK_REVERSED')
+) t
+where t.rn =1
+
+;
+
+@final_data:=
+select
+      a.order_id,
+      1 as event_type,
+      b.pay_type as payment_type,
+      a.site_name as site_name,
+      a.customer_email,
+      a.customer_phone,
+      to_char(a.order_date,'yyyy-mm-dd') as  order_date,
+      b.chargeback_reason as refusal_reason,
+      a.site_type,
+      a.erp_order_id,
+      a.erp_site_id,
+      b.card_number,
+      b.card_type,
+      a.ip,
+      a.pay_date,
+      a.site_id,
+      a.order_no,
+      b.reason_description,
+      b.journal_type,
+      md5(concat(a.order_id,a.site_id,b.pay_type,nvl(b.reason_description,''),nvl(b.journal_type,''))) as unique_id
+from @allsite_order_info a
+inner join @allpay_info b
+on (a.order_id=b.order_id and a.site_id=b.site_id)
+;
+
+
+
+
+---- 拒付原因总共分 欺诈 未收到货  货不对板 其他
+insert overwrite table dwd_looklook_daily_blacklist_info_to_oms partition(dt='${date}')
+select
+    t.order_id,
+    t.event_type,
+    t.payment_type,
+    t.site_name,
+    t.customer_email,
+    t.customer_phone,
+    t.order_date,
+    t.refusal_reason_type,
+    t.refusal_reason,
+    t.reason_description,
+    t.site_type,
+    t.erp_order_id,
+    t.erp_site_id,
+    t.card_number,
+    t.card_type,
+    t.ip,
+    t.pay_date,
+    t.order_no,
+    t.site_id,
+    t.journal_type,
+    t.unique_id,
+    '${date}' as data_dt
+from
+(
+    select
+        if(site_type='cloud',order_no,order_id) as order_id,
+        event_type,
+        payment_type,
+        site_name,
+        customer_email,
+        customer_phone,
+        order_date,
+        case when lower(refusal_reason) rlike '欺诈' or lower(refusal_reason) rlike 'fraud' then '欺诈'
+             when lower(refusal_reason) rlike '货不对板' or lower(refusal_reason) rlike '描述不符' then '货不对板'
+             when lower(refusal_reason) rlike '未收到货' then '未收到货'
+             else '其它'
+        end  as refusal_reason_type,
+        a.refusal_reason,
+        a.reason_description,
+        site_type,
+        bigint(nvl(erp_order_id,0)) as erp_order_id,
+        erp_site_id,
+        a.card_number,
+        a.card_type,
+        a.ip,
+        a.pay_date,
+        a.order_no,
+        a.site_id,
+        a.journal_type,
+        a.unique_id
+    from (select row_number() over (partition by a.unique_id order by a.pay_date asc) as rn,a.* from @final_data a) a
+    where a.rn = 1
+) t
+left anti join (select unique_id from dwd_looklook_daily_blacklist_info_to_oms where dt<'${date}' group by unique_id) t1
+on (t.unique_id = t1.unique_id)
+;
+

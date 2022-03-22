@@ -1,0 +1,87 @@
+--name:paypal胜诉率
+--author:order
+--create time:2021-09-22 09:47
+@dispute_info:=
+select
+  a.dispute_id,
+  to_char(format_shopify_date(a.create_time),'yyyymmdd') as create_date,
+  a.seller_transaction_id,
+  a.transaction_status,
+  a.dispute_currency_code,
+  a.dispute_amount,
+  a.reason,
+  a.status,
+  a.dispute_life_cycle_stage,
+  a.dispute_channel,
+  b.paypal_shop_account,
+  a.dispute_outcome,
+  get_json_object(a.dispute_outcome,'$.outcome_code') as outcome_code,
+  get_json_object(a.dispute_outcome,'$.amount_refunded') as amount_refunded,
+  c.order_id,
+  c.site_id,
+  c.site_name,
+  c.site_type,
+  get_json_object(a.disputed_transactions,'$.seller_protection_eligible') as seller_protection_eligible
+from ods_looklook_mongodb_paypal_dispute_detail_info a
+left join (select b.transaction_id,b.paypal_shop_account from ods_looklook_mongodb_paypal_transaction_info b where b.pt = '${date}' group by b.transaction_id,b.paypal_shop_account) b
+on(a.seller_transaction_id = b.transaction_id and 1=1)
+left join dwd_mapping_txn_order_site c
+on (a.seller_transaction_id = c.txn_id and c.pay_type = 'paypal' and c.pt = '${date}')
+where a.pt = '${date}' and to_char(format_shopify_date(a.create_time),'yyyymm')>='202101';
+
+@erp_order_address:=
+select a.order_id,address as address
+from
+(
+    SELECT  a.order_id,concat(a.country,"-",a.province,"-",a.city,"-",a.street) as address,row_number() over (partition by a.order_id order by a.create_time desc) as rn
+    FROM ods_erp_erp_logistics_delivery a where a.pt = '${date}'
+) a
+where rn =1 ;
+
+@mapping_erp_order:=
+select  cc.site_order_id,cc.erp_order_id,cc.site_id,cc.erp_site_id,cc.erp_order_date
+from
+(
+    select cc.site_order_id,cc.erp_order_id,cc.site_id,cc.erp_site_id,cc.erp_order_date,row_number() over (partition by  cc.site_id,cc.site_order_id order by cc.erp_order_date desc)  as rn
+from dwd_mapping_erp_order_id cc where cc.pt = '${date}'
+) cc
+where 1=1 and cc.rn = 1;
+
+
+insert overwrite table app_looklook_looklook_rpt_paypal_distupte_won_detail_info partition (pt = '${date}')
+select
+    a.create_date,
+    a.seller_transaction_id as transaction_id,
+    a.dispute_id,
+    a.dispute_currency_code,
+    a.dispute_amount,
+    a.transaction_status,
+    a.reason,
+    a.status,
+    a.dispute_life_cycle_stage,
+    a.dispute_channel,
+    a.paypal_shop_account,
+    a.order_id,
+    a.site_id,
+    a.site_name,
+    a.site_type,
+    a.outcome_code,
+    a.amount_refunded,
+    a.seller_protection_eligible,
+    case when a.status!='RESOLVED' then 'UNDER_REVIEW'
+         else
+              case when a.outcome_code = 'RESOLVED_SELLER_FAVOUR' then 'Win'
+                   when a.outcome_code = 'ACCEPTED' then 'Win'
+                   when a.outcome_code = 'CANCELED_BY_BUYER' then 'Win'
+                   when a.outcome_code = 'RESOLVED_BUYER_FAVOUR' then 'Loss'
+                   when a.outcome_code = 'RESOLVED_WITH_PAYOUT' then case when a.amount_refunded is not null then 'Refund' when a.seller_protection_eligible is not null then 'Win' else 'RESOLVED_WITH_PAYOUT' end
+                   else a.outcome_code
+              end
+    end as dispute_status,
+    if(c.order_id is null,0,1) as if_delivery
+from @dispute_info a
+left join @mapping_erp_order b
+on (a.order_id = b.site_order_id)
+left join @erp_order_address c
+on (b.erp_order_id = c.order_id)
+;

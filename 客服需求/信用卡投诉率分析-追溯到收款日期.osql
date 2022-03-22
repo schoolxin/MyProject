@@ -1,0 +1,1041 @@
+--name:信用卡投诉率分析-追溯到下单日期
+--author:order
+--create time:2022-02-09 13:41
+-- 按收款日期统计 收款的交易中那些交易被拒付了
+-- worldpay
+-- 收款
+@worldpay_paid_info:=
+select
+  t.date_beijing,
+  t.merchant_code,
+  t.currency_code,
+  t.administration_code,
+  t.transaction_code,
+  t.payment_method,
+  t.amount as paid_amount
+from
+(
+  select
+    a.date_beijing,
+    a.merchant_code,
+    a.currency_code,
+    a.administration_code,
+    a.status,
+    a.transaction_code,
+    a.payment_method,
+    a.amount,
+    a.commission,
+    row_number() over (partition by a.transaction_code order by a.date_beijing asc) as rn
+  from ods_looklook_mongodb_worldpay_info a
+  where a.pt = '${date}' and a.status in ('AUTHORISED','CAPTURED','SETTLED')
+) t
+where t.rn =1 and to_char(t.date_beijing,'yyyymmdd')>='20210601'
+;
+-- 拒付 一个交易号只取最新的状态
+@worldpay_chargeback_info:=
+select
+*
+from
+(
+    select
+      a.transaction_code
+     ,row_number() over (partition by a.transaction_code,a.administration_code order by a.date_beijing desc) as rn
+     ,a.currency_code
+     ,abs(a.amount) as charged_back_amount
+     ,a.date_beijing
+     ,a.status as charged_back_stage_last
+     ,t4.chargeback_description as charged_back_reason
+  from ods_looklook_mongodb_worldpay_info a
+  left join (
+    select
+       order_code
+      ,chargeback_description
+      ,row_number() over(distribute by order_code sort by create_time desc) as rn
+    from ods_looklook_mongodb_worldpay_chargeback_info a
+    where pt=max_pt('ods_looklook_mongodb_worldpay_chargeback_info') and a.chargeback_description is not null and length(a.chargeback_description)>0
+
+  ) t4
+  on (a.transaction_code=t4.order_code and t4.rn =1)
+  where a.pt = max_pt('ods_looklook_mongodb_worldpay_info')  and a.status in ('INFORMATION_SUPPLIED','INFORMATION_REQUESTED','CHARGED_BACK','CHARGEBACK_REVERSED')
+) charg
+where charg.rn =1
+;
+
+@worldpay_paid_chargedback_info:=
+select
+  toi.site_id
+ ,toi.site_name
+ ,toi.site_type
+ ,to_char(pi.date_beijing,'yyyymmdd') as paid_date
+ ,pi.merchant_code
+ ,pi.transaction_code
+ ,pi.currency_code
+ ,pi.paid_amount
+ ,pi.payment_method
+ ,to_char(ci.date_beijing,'yyyymmdd') as chargedback_date
+ ,ci.charged_back_amount
+ ,ci.currency_code as currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+from @worldpay_paid_info pi
+left join @worldpay_chargeback_info ci
+on (pi.transaction_code = ci.transaction_code)
+left join dwd_mapping_txn_order_site toi
+on (pi.transaction_code = toi.txn_id and toi.pay_type='worldpay' and toi.pt = max_pt('dwd_mapping_txn_order_site'))
+;
+
+--pacypay
+@pacypay_order_info_pre:=
+select
+   t3.order_id
+  ,t2.merchant_no as merchant_code
+  ,nvl(t3.site_id,0) as site_id
+  ,nvl(t3.site_name,'other') as  site_name
+  ,t1.decurrency as currency_code
+  ,t1.transproperty
+  ,t1.detime
+  ,t1.cardbincountry as bin_country
+  ,t1.merchantno
+  ,t1.demoney
+  ,'a' as type
+  ,t1.servicefee -- 交易处理费
+  ,t1.derelease -- 手续费
+  ,nvl(t3.if_swipe,0) as if_swipe
+  ,t3.site_type
+from ods_looklook_mongodb_pacypay_settle_info t1
+inner join
+(select
+    distinct
+    merchant_no,
+    currency,
+    unique_id,
+    transaction_id
+ from ods_looklook_mongodb_pacypay_transaction nt1
+ where nt1.pt = '${date}' and nt1.trade_status='SUCCESS'
+) t2
+on (t1.merchantno = t2.transaction_id)
+left join  dwd_mapping_txn_order_site t3
+on t2.transaction_id=t3.txn_id and t3.site_type in (1,12) and t3.pt='${date}' and t3.pay_type='pacypay'
+where t1.pt = '${date}' and to_char(t1.detime,'yyyymmdd')>='20210601'
+union all
+select
+   t3.order_id
+  ,t2.merchant_no as merchant_code
+  ,nvl(t3.site_id,0) as site_id
+  ,nvl(t3.site_name,'other') as  site_name
+  ,t1.decurrency as currency_code
+  ,t1.transproperty
+  ,t1.detime
+  ,t1.cardbincountry as bin_country
+  ,t1.merchantno
+  ,t1.demoney
+  ,'b' as type
+  ,t1.servicefee -- 交易处理费
+  ,t1.derelease -- 手续费
+  ,nvl(t3.if_swipe,0) as if_swipe
+  ,t3.site_type
+from ods_looklook_mongodb_pacypay_settle_info t1
+inner join
+(
+    select distinct
+     merchant_no,
+     currency,
+     unique_id,
+     transaction_id
+   from ods_looklook_mongodb_pacypay_transaction nt1
+   where nt1.pt = '${date}' and nt1.trade_status='SUCCESS'
+ ) t2 on (t1.merchantno = t2.transaction_id)
+left join dwd_mapping_txn_order_site t3
+on t2.unique_id=t3.unique_id and t3.site_type in (2,5,3) and t3.pt='${date}' and t3.pay_type='pacypay'
+where t1.pt = '${date}' and to_char(t1.detime,'yyyymmdd')>='20210601';
+
+
+@data_rank:=
+select a.*,rank() over (partition by  merchantno order by nvl(order_id,'zzzzzzzzzz') asc) as rank_code
+from @pacypay_order_info_pre a;
+
+@pacypay_order_info:=
+select
+   tb1.order_id
+  ,tb1.merchant_code
+  ,tb1.site_id
+  ,tb1.site_name
+  ,tb1.currency_code
+  ,tb1.transproperty
+  ,tb1.detime
+  ,tb1.bin_country
+  ,tb1.merchantno
+  ,tb1.demoney
+  ,tb1.servicefee
+  ,tb1.derelease
+  ,tb1.if_swipe
+  ,tb1.site_type
+from @data_rank tb1
+where tb1.rank_code = 1 and tb1.order_id is not null
+union all
+select
+   tb1.order_id
+  ,tb1.merchant_code
+  ,tb1.site_id
+  ,tb1.site_name
+  ,tb1.currency_code
+  ,tb1.transproperty
+  ,tb1.detime
+  ,tb1.bin_country
+  ,tb1.merchantno
+  ,tb1.demoney
+  ,tb1.servicefee
+  ,tb1.derelease
+  ,tb1.if_swipe
+  ,tb1.site_type
+from
+(
+    select t.*,rank() over (partition by  merchantno order by t.type) as rank_code_n
+    from @data_rank t
+    where t.rank_code = 1 and t.order_id is  null
+) tb1
+where tb1.rank_code_n = 1;
+
+--收款
+@pacypay_paid_info:=
+select
+  poi.site_id
+ ,poi.site_name
+ ,poi.site_type
+ ,to_char(poi.detime,'yyyymmdd') as paid_date
+ ,poi.demoney as paid_amount
+ ,poi.currency_code
+ ,poi.merchant_code as merchant_code
+ ,poi.merchantno as transaction_code
+ ,'' as payment_method
+from @pacypay_order_info poi
+where poi.transproperty = '交易成功'
+;
+-- 拒付
+@pacypay_chargeback_info:=
+select
+  charg.*
+from
+(
+  select
+    poi.merchantno as transaction_code
+   ,poi.demoney as charged_back_amount
+   ,poi.currency_code as currency_code_chargedback
+   ,to_char(poi.detime,'yyyymmdd') as chargedback_date
+   ,row_number() over (partition by poi.merchantno order by poi.detime asc) as rn
+   ,poi.transproperty as charged_back_stage_last
+   ,b1.remark as charged_back_reason
+  from @pacypay_order_info poi
+  left join (
+    select b1.transaction_id,trim(regexp_replace(b1.remark,'[^a-zA-Z\\s]',' ')) as remark,b1.port_status,b1.chargeback_id,row_number() over (partition by b1.transaction_id order by b1.chargeback_time desc) as rn
+    from ods_looklook_mongodb_pacypay_transaction  b1 where b1.pt = '${date}' and b1.port_status = 'chargeback'
+  ) b1
+  on (poi.merchantno = b1.transaction_id and b1.rn =1)
+  where poi.transproperty = '拒付'
+) charg
+where charg.rn =1
+;
+
+@pacypay_paid_chargedback_info:=
+select
+  pi.site_id
+ ,pi.site_name
+ ,pi.site_type
+ ,pi.paid_date as paid_date
+ ,pi.merchant_code
+ ,pi.transaction_code
+ ,pi.currency_code
+ ,pi.paid_amount
+ ,pi.payment_method
+ ,ci.chargedback_date as chargedback_date
+ ,ci.charged_back_amount
+ ,ci.currency_code_chargedback as currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+from @pacypay_paid_info pi
+left join @pacypay_chargeback_info ci
+on (pi.transaction_code = ci.transaction_code)
+;
+-- checkout
+@checkout_trans_info:=
+select
+  dateadd(format_shopify_date(a.breakdown_date),-8,'hh') as trans_date,
+  lower(a.breakdown_type) as breakdown_type,
+  a.payment_id,
+  a.processing_currency as payment_currency,
+  a.processing_currency_amount,
+  a.channel_name as merchant_account,
+  a.action_type,
+  a.reference,
+  a.payment_method
+from (select * from ods_looklook_mongodb_checkout_data_csv a where a.pt = '${date}' and lower(a.breakdown_type) not like '%fee%') a
+where (lower(a.breakdown_type) rlike 'capture' or lower(a.breakdown_type) rlike 'refunded' or lower(a.breakdown_type) rlike 'chargeback' or lower(a.breakdown_type) rlike 'chargeback_reversal')
+;
+
+--收款
+@checkout_paid_info:=
+select
+  to_char(cti.trans_date,'yyyymmdd') as paid_date
+ ,cti.merchant_account as merchant_code
+ ,cti.processing_currency_amount as paid_amount
+ ,cti.payment_currency as currency_code
+ ,cti.payment_method
+ ,cti.reference as transaction_code
+from @checkout_trans_info cti
+where cti.breakdown_type rlike 'capture'
+;
+-- 拒付
+@checkout_chargeback_info:=
+select
+  charg.*
+from
+(
+    select
+      cti.reference as transaction_code
+     ,cti.payment_currency as currency_code_chargedback
+     ,to_char(cti.trans_date,'yyyymmdd') as chargedback_date
+     ,cti.processing_currency_amount as charged_back_amount
+     ,if(cti.processing_currency_amount>0,'chargeback_reversal','chargeback') as charged_back_stage_last
+     ,t3.category as charged_back_reason
+     ,row_number() over (partition by cti.reference order by cti.trans_date desc) as rn
+  from @checkout_trans_info cti
+  left join (
+    select
+       a.payment_reference
+      ,a.category
+      ,row_number() over(distribute by a.payment_reference sort by a.received_on desc) as rn
+    from ods_looklook_mongodb_checkout_dispute_data a
+    where pt=max_pt('ods_looklook_mongodb_checkout_dispute_data')
+
+  )t3
+  on cti.reference=t3.payment_reference and t3.rn=1
+  where cti.breakdown_type rlike 'chargeback'
+) charg
+where charg.rn =1
+;
+@checkout_paid_chargedback_info:=
+select
+  toi.site_id
+ ,toi.site_name
+ ,toi.site_type
+ ,pi.paid_date as paid_date
+ ,pi.merchant_code
+ ,pi.transaction_code
+ ,pi.currency_code
+ ,pi.paid_amount
+ ,pi.payment_method
+ ,ci.chargedback_date as chargedback_date
+ ,ci.charged_back_amount
+ ,ci.currency_code_chargedback as currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+from @checkout_paid_info pi
+left join @checkout_chargeback_info ci
+on (pi.transaction_code = ci.transaction_code)
+left join (select t2.site_type,t2.site_id,t2.site_name,t2.unique_id as txn_id,t2.order_id from dwd_mapping_txn_order_site t2 where t2.pay_type='checkout' and t2.pt='${date}' group by t2.site_type,t2.site_id,t2.site_name,t2.unique_id,t2.order_id) toi
+on pi.transaction_code=toi.txn_id
+;
+
+
+-- cardpay
+@cardpay_trans_info:=
+select
+  get_json_object(a.merchant_order,'$.id') as checkout_id,
+  get_json_object(a.payment_data,'$.id') as trans_id,
+  get_json_object(a.payment_data,'$.amount') as trans_amount,
+  get_json_object(a.payment_data,'$.created') as trans_date,
+  get_json_object(a.payment_data,'$.currency') as currency_code,
+  get_json_object(a.payment_data,'$.status') as trans_status,
+  get_json_object(a.payment_data,'$.decline_reason') as decline_reason,
+  get_json_object(a.payment_data,'$.decline_code') as decline_code,
+  get_json_object(a.card_account,'$.issuing_country_code') as card_issue_country,
+  get_json_object(a.card_account,'$.masked_pan') as card_no,
+  case when get_json_object(a.card_account,'$.masked_pan') like '4%' then 'Visa' when get_json_object(a.card_account,'$.masked_pan') like '2%' or get_json_object(a.card_account,'$.masked_pan') like '5%' then 'MasterCard' else 'other' end card_type,
+  a.terminal_code as merchant_code
+from ods_looklook_mongodb_cardpay_payments a
+where a.pt = '${date}'
+;
+
+-- 收款
+@cardpay_paid_info:=
+select
+   to_char(dateadd(format_shopify_date(ti.trans_date),-8,'hh'),'yyyymmdd') as paid_date
+  ,ti.merchant_code
+  ,ti.trans_id as transaction_code
+  ,ti.currency_code
+  ,ti.trans_amount as paid_amount
+  ,ti.card_type as payment_method
+from @cardpay_trans_info ti
+where ti.trans_status in ('COMPLETED','REFUNDED')
+;
+-- 拒付
+@cardpay_charged_back_info:=
+select
+   get_json_object(a.merchant_order,'$.id') as order_on,
+   get_json_object(a.payment_data,'$.amount') as charged_back_amount,
+   callback_time as charged_back_date,
+   get_json_object(a.payment_data,'$.currency') as currency_code,
+   get_json_object(a.payment_data,'$.status') as status,
+   get_json_object(a.payment_data,'$.id') as trans_id,
+   get_json_object(a.card_account,'$.masked_pan') as card_no
+from ods_looklook_mongodb_cardpay_webhook_data a
+where a.pt = '${date}' and get_json_object(a.payment_data,'$.status') = 'CHARGED_BACK';
+
+@cardpay_chargeback_info:=
+select
+*
+from
+(
+   select
+     bi.trans_id as transaction_code
+    ,to_char(dateadd(format_shopify_date(bi.charged_back_date),-8,'hh'),'yyyymmdd') as chargedback_date
+    ,bi.currency_code as currency_code_chargedback
+    ,bi.charged_back_amount as charged_back_amount
+    ,bi.status as charged_back_stage_last
+    ,'' as charged_back_reason
+    ,row_number() over (partition by bi.trans_id order by bi.charged_back_date desc) as rn
+  from @cardpay_charged_back_info bi
+) charg
+where charg.rn =1
+;
+
+@cardpay_paid_chargedback_info:=
+select
+  toi.site_id
+ ,toi.site_name
+ ,toi.site_type
+ ,pi.paid_date as paid_date
+ ,pi.merchant_code
+ ,pi.transaction_code
+ ,pi.currency_code
+ ,pi.paid_amount
+ ,pi.payment_method
+ ,ci.chargedback_date as chargedback_date
+ ,ci.charged_back_amount
+ ,ci.currency_code_chargedback as currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+from @cardpay_paid_info pi
+left join @cardpay_chargeback_info ci
+on (pi.transaction_code = ci.transaction_code)
+left join dwd_mapping_txn_order_site toi
+on (pi.transaction_code = toi.txn_id and toi.pay_type='cardpay' and toi.pt = max_pt('dwd_mapping_txn_order_site'))
+;
+
+--ebanx
+-- 收款
+@ebanx_payment_order:=
+select
+  a.confirm_date,
+  b.site_id,
+  b.site_name,
+  b.site_type,
+  a.currency_ext as currency_code,
+  a.merchant as merchant_code,
+  a.amount_ext as payments_received,
+  b.order_id,
+  nvl(b.if_swipe,0) as if_swipe,
+  a.payment_hash,
+  lower(a.country) as country,
+  case when lower(a.country) = 'brazil' then
+       case when lower(payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(payment_type_group) = 'boleto bancário' then 'boleto'
+            else 'bank_transfer'
+       end
+       when lower(a.country) = 'mexico' then
+       case when lower(payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(payment_type_group) = 'boleto bancário' then 'debit_card'
+            when lower(payment_type_group) = 'oxxo' then 'oxxo'
+            else 'bank_transfer'
+       end
+       when lower(a.country) = 'colombia' then
+       case when lower(payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(payment_type_group) = 'cartão de débito' then 'debit_card'
+            when lower(payment_type_group) in ('baloto','cash') then 'cash_payment'
+            else 'credit_card'
+       end
+       when lower(a.country) = 'chile' then
+       case when lower(payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(payment_type_group) = 'cartão de débito' then 'debit_card'
+            when lower(payment_type_group) in ('baloto','cash','sencillito') then 'cash_payment'
+            else 'credit_card'
+       end
+       when lower(a.country) = 'peru' then
+       case when lower(payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(payment_type_group) = 'cartão de débito' then 'debit_card'
+            when lower(payment_type_group) in ('baloto','cash','sencillito') then 'cash_payment'
+            else 'credit_card'
+       end
+       when lower(a.country) = 'argentina' then
+       case when lower(payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(payment_type_group) = 'cartão de débito' then 'debit_card'
+            when lower(payment_type_group) in ('baloto','cash','sencillito') then 'cash_payment'
+            else 'credit_card'
+       end
+  else 0
+  end as pay_method,
+  a.order_number
+from ods_looklook_mongodb_ebanx_transactions_data a
+left join dwd_mapping_txn_order_site b
+on (a.order_number = b.txn_id and b.pay_type = 'ebanx' and b.pt = '${date}')
+where a.pt = '${date}' and a.sheet_name = 'payment' and lower(a.status) = 'co'
+;
+
+@ebanx_refund_info:=
+select
+  b.order_number,
+  a.confirm_date,
+  a.currency_ext,
+  a.amount_ext as amount_ext,
+  a.merchant,
+  b.payment_hash,
+  b.country
+from ods_looklook_mongodb_ebanx_transactions_data a
+inner join ods_looklook_mongodb_ebanx_transactions_data b
+on (a.payment_hash = b.payment_hash and lower(b.sheet_name) = 'payment' and lower(b.status) = 'co' and b.pt = '${date}')
+where a.pt = '${date}' and lower(a.sheet_name) = 'refund'
+;
+@ebanx_pay_info:=
+select
+ a.site_id,
+ a.site_name,
+ a.if_swipe,
+ a.currency_code,
+ a.payments_received-nvl(b.amount_ext,0) as remaind_payments,
+ a.payments_received,
+ b.amount_ext,
+ b.currency_ext,
+ a.payment_hash,
+ a.merchant_code,
+ a.order_id
+from @ebanx_payment_order a
+left join @ebanx_refund_info b
+on (a.payment_hash = b.payment_hash)
+;
+@ebanx_chargeback_order:=
+select
+  a.chargeback_date,
+  b.site_name,
+  b.site_id,
+  b.if_swipe,
+  b.currency_code,
+  b.remaind_payments as chargeback_acmout,
+  b.merchant_code,
+  a.description,
+  a.payment_hash,
+  b.order_id,
+  5 as chargeback_fee_usd
+from ods_looklook_mongodb_ebanx_transactions_data a
+inner join
+(
+  select a.payment_hash,a.currency_code,a.remaind_payments,a.site_id,a.site_name,a.if_swipe,a.merchant_code,a.order_id
+  from @ebanx_pay_info a group by a.payment_hash,a.currency_code,a.remaind_payments,a.site_id,a.site_name,a.if_swipe,a.merchant_code,a.order_id
+) b
+on (a.payment_hash =b.payment_hash)
+where a.pt = '${date}' and a.sheet_name rlike  'chargeback';
+
+--收款
+@ebanx_paid_info:=
+select
+  replace(po.confirm_date,'-','') as paid_date
+ ,po.site_id
+ ,po.site_name
+ ,po.site_type
+ ,po.order_number as transaction_code
+ ,po.merchant_code as merchant_code
+ ,po.payments_received as paid_amount
+ ,po.currency_code
+ ,po.pay_method as payment_method
+ ,po.payment_hash
+from @ebanx_payment_order po
+;
+
+--拒付
+@ebanx_chargeback_info:=
+select
+*
+from
+(
+  select
+    replace(co.chargeback_date,'-','') as chargedback_date
+   ,co.currency_code as currency_code_chargedback
+   ,co.chargeback_acmout as charged_back_amount
+   ,co.description as charged_back_reason
+   ,'chargeback' as charged_back_stage_last
+   ,co.payment_hash
+   ,row_number() over (partition by co.payment_hash order by co.chargeback_date desc) as rn
+  from @ebanx_chargeback_order co
+) charg
+where charg.rn =1
+;
+@ebanx_paid_chargedback_info:=
+select
+  pi.site_id
+ ,pi.site_name
+ ,pi.site_type
+ ,pi.paid_date as paid_date
+ ,pi.merchant_code
+ ,pi.transaction_code
+ ,pi.currency_code
+ ,pi.paid_amount
+ ,pi.payment_method
+ ,ci.chargedback_date as chargedback_date
+ ,ci.charged_back_amount
+ ,ci.currency_code_chargedback as currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+from @ebanx_paid_info pi
+left join @ebanx_chargeback_info ci
+on (pi.payment_hash = ci.payment_hash)
+;
+-- credorax
+@credorax_processing_activity:=
+select
+ t.transaction_date,
+ t.transaction_type,
+ t.request_id,
+ t.payment_id,
+ t.mid,
+ t.orig_transaction_amount,
+ t.orig_transaction_currency,
+ row_number() over (partition by t.request_id,t.transaction_type order by t.transaction_date asc) as rn,
+ t.card_scheme
+from
+(
+  select
+      case when length(regexp_replace(a.posting_date,'[^0-9]',''))=8 then regexp_replace(a.posting_date,'[^0-9]','')
+           else concat(substring(regexp_replace(a.posting_date,'[^0-9]',''),1,6),'0',substring(regexp_replace(a.posting_date,'[^0-9]',''),7,1))
+      end as transaction_date,
+      a.transaction_type,
+      a.request_id,
+      a.payment_id,
+      a.mid,
+      a.orig_transaction_amount,
+      a.orig_transaction_currency,
+      a.card_scheme
+  from ods_looklook_mongodb_credorax_processing_activity a
+  where a.pt = '${date}'
+) t
+;
+-- 收入
+@credorax_paid_info:=
+select
+  replace(a.transaction_date,'-','') as  paid_date,
+  a.mid as merchant_code,
+  a.orig_transaction_amount as paid_amount,
+  a.orig_transaction_currency as currency_code,
+  a.payment_id,
+  a.request_id as transaction_code,
+  a.card_scheme as payment_method
+from @credorax_processing_activity a
+where a.rn = 1 and a.transaction_type = 'Purchase'
+;
+
+--拒付
+@credorax_chargeback_infos:=
+select
+  case when length(regexp_replace(a.posting_date,'[^0-9]',''))=8 then regexp_replace(a.posting_date,'[^0-9]','')
+       else concat(substring(regexp_replace(a.posting_date,'[^0-9]',''),1,6),'0',substring(regexp_replace(a.posting_date,'[^0-9]',''),7,1))
+  end as transaction_date,
+  a.mid as merchant_code,
+  a.orig_transaction_amount as transaction_amount,
+  a.orig_transaction_currency as currency_code,
+  a.transaction_type,
+  a.orig_request_id as transaction_code,
+  a.payment_id,
+  a.reason_desc
+from ods_looklook_mongodb_credorax_chargeback_activity a
+where a.pt = '${date}'
+;
+@credorax_chargeback_info:=
+select
+*
+from
+(
+    select
+    ci.transaction_date as chargedback_date
+   ,ci.transaction_code
+   ,ci.currency_code as currency_code_chargedback
+   ,ci.transaction_amount as charged_back_amount
+   ,ci.transaction_type as charged_back_stage_last
+   ,ci.reason_desc as charged_back_reason
+   ,row_number() over (partition by ci.transaction_code order by ci.transaction_date desc) as rn
+  from @credorax_chargeback_infos ci
+)
+charg
+where charg.rn =1
+;
+@credorax_paid_chargedback_info:=
+select
+  toi.site_id
+ ,toi.site_name
+ ,toi.site_type
+ ,pi.paid_date as paid_date
+ ,pi.merchant_code
+ ,pi.transaction_code
+ ,pi.currency_code
+ ,pi.paid_amount
+ ,pi.payment_method
+ ,ci.chargedback_date as chargedback_date
+ ,ci.charged_back_amount
+ ,ci.currency_code_chargedback as currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+from @credorax_paid_info pi
+left join @credorax_chargeback_info ci
+on (pi.transaction_code = ci.transaction_code)
+left join dwd_mapping_txn_order_site toi
+on (pi.transaction_code = toi.txn_id and toi.pay_type='credorax' and toi.pt = max_pt('dwd_mapping_txn_order_site'))
+;
+
+--oceanpaycash
+-- 收款
+@oceanpaycash_paid_info:=
+select
+  replace(substring(accounting_time,1,10),'-','') as paid_date
+ ,td.account_order_code as transaction_code
+ ,td.terminal_number as merchant_code
+ ,td.transaction_amount as paid_amount
+ ,td.transaction_currency as currency_code
+ ,td.cards as payment_method
+from ods_looklook_mongodb_oceanpaycash_transactions_detail td
+where td.pt = '${date}' and replace(substring(accounting_time,1,10),'-','')>='20210601' and td.transaction_type = '成功'
+;
+
+--拒付
+@oceanpaycash_chargeback_info:=
+select
+*
+from
+(
+    select
+    replace(substring(accounting_time,1,10),'-','') as chargedback_date
+   ,td.transaction_amount as charged_back_amount
+   ,td.transaction_currency as currency_code_chargedback
+   ,'' as charged_back_reason
+   ,td.transaction_type as charged_back_stage_last
+   ,td.account_order_code as transaction_code
+   ,row_number() over (partition by td.account_order_code order by td.accounting_time desc) as rn
+  from ods_looklook_mongodb_oceanpaycash_transactions_detail td
+  where td.pt = '${date}' and replace(substring(accounting_time,1,10),'-','')>='20210601' and td.transaction_type in ('拒付','申诉成功')
+) charg
+where charg.rn =1
+;
+
+@oceanpaycash_paid_chargedback_info:=
+select
+  toi.site_id
+ ,toi.site_name
+ ,toi.site_type
+ ,pi.paid_date as paid_date
+ ,pi.merchant_code
+ ,pi.transaction_code
+ ,pi.currency_code
+ ,pi.paid_amount
+ ,pi.payment_method
+ ,ci.chargedback_date as chargedback_date
+ ,ci.charged_back_amount
+ ,ci.currency_code_chargedback as currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+from @oceanpaycash_paid_info pi
+left join @oceanpaycash_chargeback_info ci
+on (pi.transaction_code = ci.transaction_code)
+left join dwd_mapping_txn_order_site toi
+on (pi.transaction_code = toi.txn_id and toi.pay_type='oceanpaycash' and toi.pt = max_pt('dwd_mapping_txn_order_site'))
+;
+
+-- airwallex
+--收款
+@airwallex_paid_info:=
+select
+   substring(replace(a.created_at_bj,'-',''),1,8) as paid_date
+  ,a.site_name as merchant_code
+  ,a.currency as currency_code
+  ,a.amount as paid_amount
+  ,a.method as payment_method
+  ,a.id as transaction_code
+from ods_looklook_mongodb_airwallex_payments a
+where a.pt = '${date}' and substring(replace(a.created_at_bj,'-',''),1,8)>='20210601' and a.status = 'SUCCEEDED';
+
+-- 拒付
+@airwallex_dispute_info:=
+select
+  format_shopify_date(a.created_at) as created_at,
+  get_json_object(a.data,'$.object.payment_intent_id') as payment_intent_id,
+  get_json_object(a.data,'$.object.card_scheme') as card_scheme,
+  get_json_object(a.data,'$.object.dispute_amount') as dispute_amount,
+  get_json_object(a.data,'$.object.dispute_currency') as dispute_currency,
+  get_json_object(a.data,'$.object.dispute_reason_type') as dispute_reason,
+  format_shopify_date(get_json_object(a.data,'$.object.updated_at')) as updated_at,
+  get_json_object(a.data,'$.object.status') as dispute_status,
+  get_json_object(a.data,'$.object.stage') as dispute_stage,
+  lower(a.name) as dispute_lifecycle,
+  a.account_id,
+  get_json_object(a.data,'$.object.dispute_id') as dispute_id
+from ods_looklook_mongodb_airwallex_chargeback_webhook a
+where a.pt = '${date}';
+-- 拒付
+@airwallex_chargeback_info:=
+select *
+from
+(
+  select
+    to_char(di.updated_at,'yyyymmdd') as chargedback_date
+   ,di.payment_intent_id as  transaction_code
+   ,di.dispute_status as charged_back_stage_last
+   ,di.dispute_reason as charged_back_reason
+   ,row_number() over (partition by payment_intent_id order by di.updated_at desc) as rn
+   ,di.dispute_amount as charged_back_amount
+   ,di.dispute_currency as currency_code_chargedback
+  from @airwallex_dispute_info di
+) charg
+where charg.rn =1
+;
+@airwallex_paid_chargedback_info:=
+select
+  toi.site_id
+ ,toi.site_name
+ ,toi.site_type
+ ,pi.paid_date as paid_date
+ ,pi.merchant_code
+ ,pi.transaction_code
+ ,pi.currency_code
+ ,pi.paid_amount
+ ,pi.payment_method
+ ,ci.chargedback_date as chargedback_date
+ ,ci.charged_back_amount
+ ,ci.currency_code_chargedback as currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+from @airwallex_paid_info pi
+left join @airwallex_chargeback_info ci
+on (pi.transaction_code = ci.transaction_code)
+left join dwd_mapping_txn_order_site toi
+on (pi.transaction_code = toi.txn_id and toi.pay_type='airwallex' and toi.pt = max_pt('dwd_mapping_txn_order_site'))
+;
+-- stripe
+--收款
+@stripe_paid_info:=
+select
+    sp.id as transaction_code
+   ,sp.amount/100 as paid_amount
+   ,to_char(from_unixtime(sp.created),'yyyymmdd') as paid_date
+   ,upper(sp.currency) as currency_code
+   ,sp.site_name as merchant_code
+   ,sp.payment_method
+from ods_looklook_mongodb_stripe_payment sp
+where sp.pt = '${date}' and sp.object = 'charge' and sp.status = 'succeeded'
+;
+-- 拒付
+@stripe_chargeback_info:=
+select
+  to_char(from_unixtime(sd.created),'yyyymmdd') as chargedback_date
+ ,sd.charge as transaction_code
+ ,sd.amount/100 as charged_back_amount
+ ,upper(sd.currency) as currency_code_chargedback
+ ,lower(sd.status) as charged_back_stage_last
+ ,sd.reason as charged_back_reason
+ ,row_number() over (partition by sd.charge order by sd.created desc) as rn
+from ods_looklook_mongodb_stripe_disputes  sd
+where sd.pt = '${date}'
+;
+
+@stripe_paid_chargedback_info:=
+select
+  toi.site_id
+ ,toi.site_name
+ ,toi.site_type
+ ,pi.paid_date as paid_date
+ ,pi.merchant_code
+ ,pi.transaction_code
+ ,pi.currency_code
+ ,pi.paid_amount
+ ,pi.payment_method
+ ,ci.chargedback_date as chargedback_date
+ ,ci.charged_back_amount
+ ,ci.currency_code_chargedback as currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+from @stripe_paid_info pi
+left join @stripe_chargeback_info ci
+on (pi.transaction_code = ci.transaction_code)
+left join dwd_mapping_txn_order_site toi
+on (pi.transaction_code = toi.txn_id and toi.pay_type='stripe' and toi.pt = max_pt('dwd_mapping_txn_order_site'))
+;
+
+
+@all_paid_chargedback_info:=
+select
+  ci.site_id
+ ,ci.site_name
+ ,ci.site_type
+ ,ci.transaction_code
+ ,ci.merchant_code
+ ,ci.paid_date
+ ,ci.paid_amount
+ ,ci.currency_code
+ ,ci.chargedback_date
+ ,ci.charged_back_amount
+ ,ci.currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+ ,ci.payment_method
+ ,'stripe' as pay_type
+from @stripe_paid_chargedback_info ci
+union all
+select
+  ci.site_id
+ ,ci.site_name
+ ,ci.site_type
+ ,ci.transaction_code
+ ,ci.merchant_code
+ ,ci.paid_date
+ ,ci.paid_amount
+ ,ci.currency_code
+ ,ci.chargedback_date
+ ,decimal(ci.charged_back_amount) as charged_back_amount
+ ,ci.currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+ ,ci.payment_method
+ ,'airwallex' as pay_type
+from @airwallex_paid_chargedback_info ci
+union all
+select
+  ci.site_id
+ ,ci.site_name
+ ,ci.site_type
+ ,ci.transaction_code
+ ,ci.merchant_code
+ ,ci.paid_date
+ ,decimal(ci.paid_amount) as paid_amount
+ ,ci.currency_code
+ ,ci.chargedback_date
+ ,decimal(ci.charged_back_amount) as charged_back_amount
+ ,ci.currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+ ,ci.payment_method
+ ,'oceanpaycash' as pay_type
+from @oceanpaycash_paid_chargedback_info ci
+union all
+select
+  ci.site_id
+ ,ci.site_name
+ ,ci.site_type
+ ,ci.transaction_code
+ ,ci.merchant_code
+ ,ci.paid_date
+ ,decimal(ci.paid_amount) as paid_amount
+ ,ci.currency_code
+ ,ci.chargedback_date
+ ,decimal(ci.charged_back_amount) as charged_back_amount
+ ,ci.currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+ ,ci.payment_method
+ ,'credorax' as pay_type
+from @credorax_paid_chargedback_info ci
+union all
+select
+  ci.site_id
+ ,ci.site_name
+ ,ci.site_type
+ ,ci.transaction_code
+ ,ci.merchant_code
+ ,ci.paid_date
+ ,decimal(ci.paid_amount) as paid_amount
+ ,ci.currency_code
+ ,ci.chargedback_date
+ ,decimal(ci.charged_back_amount) as charged_back_amount
+ ,ci.currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+ ,ci.payment_method
+ ,'ebanx' as pay_type
+from @ebanx_paid_chargedback_info ci
+union all
+select
+  ci.site_id
+ ,ci.site_name
+ ,ci.site_type
+ ,ci.transaction_code
+ ,ci.merchant_code
+ ,ci.paid_date
+ ,decimal(ci.paid_amount) as paid_amount
+ ,ci.currency_code
+ ,ci.chargedback_date
+ ,decimal(ci.charged_back_amount) as charged_back_amount
+ ,ci.currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+ ,ci.payment_method
+ ,'cardpay' as pay_type
+from @cardpay_paid_chargedback_info ci
+union all
+select
+  ci.site_id
+ ,ci.site_name
+ ,ci.site_type
+ ,ci.transaction_code
+ ,ci.merchant_code
+ ,ci.paid_date
+ ,decimal(ci.paid_amount) as paid_amount
+ ,ci.currency_code
+ ,ci.chargedback_date
+ ,decimal(ci.charged_back_amount) as charged_back_amount
+ ,ci.currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+ ,ci.payment_method
+ ,'checkout' as pay_type
+from @checkout_paid_chargedback_info ci
+union all
+select
+  ci.site_id
+ ,ci.site_name
+ ,ci.site_type
+ ,ci.transaction_code
+ ,ci.merchant_code
+ ,ci.paid_date
+ ,decimal(ci.paid_amount) as paid_amount
+ ,ci.currency_code
+ ,ci.chargedback_date
+ ,decimal(ci.charged_back_amount) as charged_back_amount
+ ,ci.currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+ ,ci.payment_method
+ ,'pacypay' as pay_type
+from @pacypay_paid_chargedback_info ci
+union all
+select
+  ci.site_id
+ ,ci.site_name
+ ,ci.site_type
+ ,ci.transaction_code
+ ,ci.merchant_code
+ ,ci.paid_date
+ ,decimal(ci.paid_amount) as paid_amount
+ ,ci.currency_code
+ ,ci.chargedback_date
+ ,decimal(ci.charged_back_amount) as charged_back_amount
+ ,ci.currency_code_chargedback
+ ,ci.charged_back_reason
+ ,ci.charged_back_stage_last
+ ,ci.payment_method
+ ,'worldpay' as pay_type
+from @worldpay_paid_chargedback_info ci
+;
+
+
+
+select
+  a.pay_type
+ ,substring(a.paid_date,1,6) as data_month
+ ,count(distinct a.transaction_code) as paid_cnt
+ ,count(distinct case when a.chargedback_date is not null then a.transaction_code end) as chargeback_cnt
+from @all_paid_chargedback_info a where a.site_id = '18578' and a.paid_date>='20210601'
+group by a.pay_type,
+substring(a.paid_date,1,6) ;

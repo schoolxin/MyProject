@@ -1,0 +1,42 @@
+
+@refunds_chargeback:=
+select
+    tb1.order_id,
+    sum(is_refund) as is_refund,
+    sum(is_chargebacked) as is_chargebacked
+from
+(
+   select
+      distinct
+      t3.order_id,
+      case when t1.transaction_event_code = 'T1107' then '1' else '0' end is_refund,
+      case when t1.transaction_event_code in ('T1110','T1201','T1106','T1116') then '1' else '0' end as is_chargebacked
+  from ods_looklook_mongodb_paypal_transaction_info t1
+  left join ods_looklook_mongodb_paypal_transaction_info t2
+  on t1.paypal_reference_id=t2.transaction_id and t2.pt = '${date}'
+  left join dwd_mapping_txn_order_site t3
+  on nvl(t2.paypal_reference_id,nvl(t1.paypal_reference_id,t1.transaction_id))=t3.txn_id and t3.pay_type='paypal' and t3.pt='${date}'
+  where 1=1 and t1.pt = '${date}' and t1.transaction_amount_value<0  and t1.paypal_shop_account = 'limeshape@163.com'
+) tb1
+where tb1.order_id is not null
+group by tb1.order_id
+;
+
+
+create table tmp_erp_charge_back_order_info
+as
+select
+  distinct a.order_no,a.pay_time,a.add_time,b.is_delivery,c.old_no as product_no,a.order_price,b.price as goods_price,t1.is_refund,t1.is_chargebacked
+from ods_erp_erp_order_order a
+inner join ods_erp_erp_order_order_goods b
+on (a.id = b.order_id and b.pt = '${date}')
+inner join ods_erp_erp_product_spu c
+on (b.spu_id = c.id and c.pt = '${date}')
+inner join ods_erp_erp_sys_site t
+on (a.site_id = t.site_id and t.pt = '${date}')
+inner join dwd_mapping_erp_order_id v
+on (to_char(a.id) = v.erp_order_id and v.pt = '${date}' and a.site_id = v.erp_site_id)
+inner join @refunds_chargeback t1
+on (v.site_order_id = t1.order_id)
+where a.pt = '${date}' and to_char(a.pay_time,'yyyymmdd') between '20201005' and '20210405';
+;

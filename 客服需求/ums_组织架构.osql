@@ -1,0 +1,532 @@
+--name:ums_组织架构
+--author:order
+--create time:2021-09-17 18:20
+@ums_org_organizational:=
+select
+*
+from ods_ums_ums_org_organizational a
+where a.pt = '${date}' and a.is_delete = 0;
+--- 0
+@start_level:=
+select
+ a.id,a.parent_id,a.organizational_name
+from @ums_org_organizational a
+where a.parent_id = '0' and a.is_delete = 0 and a.pt = '${date}';
+
+--1_level
+@1_level:=
+select
+  a.id,a.parent_id,a.organizational_name as current_name,b.organizational_name as parent_name
+from @ums_org_organizational a
+inner join @start_level b
+on (a.parent_id = b.id)
+;
+--2_level
+@2_level:=
+select
+  a.id,a.parent_id,a.organizational_name as current_name,b.current_name as parent_name
+from @ums_org_organizational a
+inner join @1_level b
+on (a.parent_id = b.id)
+;
+
+--3_level
+@3_level:=
+select
+  a.id,a.parent_id,a.organizational_name as current_name,b.current_name as parent_name
+from @ums_org_organizational a
+inner join @2_level b
+on (a.parent_id = b.id)
+;
+--4_level
+@4_level:=
+select
+  a.id,a.parent_id,a.organizational_name as current_name,b.current_name as parent_name
+from @ums_org_organizational a
+inner join @3_level b
+on (a.parent_id = b.id)
+;
+--5_level
+@5_level:=
+select
+  a.id,a.parent_id,a.organizational_name as current_name,b.current_name as parent_name
+from @ums_org_organizational a
+inner join @4_level b
+on (a.parent_id = b.id)
+;
+--6_level
+@6_level:=
+select
+  a.id,a.parent_id,a.organizational_name as current_name,b.current_name as parent_name
+from @ums_org_organizational a
+inner join @5_level b
+on (a.parent_id = b.id)
+;
+--7_level
+@7_level:=
+select
+  a.id,a.parent_id,a.organizational_name as current_name,b.current_name as parent_name
+from @ums_org_organizational a
+inner join @6_level b
+on (a.parent_id = b.id)
+;
+
+--name
+@organizational_name_info:=
+select
+  t.organizational_name,t.1_id
+from
+(
+  select
+      a.organizational_name,b.id as 1_id,c.id as 2_id,d.id as 3_id,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from @start_level a
+  left join @1_level b
+  on (a.id = b.parent_id)
+  left join @2_level c
+  on (b.id = c.parent_id)
+  left join @3_level d
+  on (c.id = d.parent_id)
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.1_id
+union all
+select
+  t.organizational_name,t.2_id
+from
+(
+  select
+      a.organizational_name,b.id as 1_id,c.id as 2_id,d.id as 3_id,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from @start_level a
+  left join @1_level b
+  on (a.id = b.parent_id)
+  left join @2_level c
+  on (b.id = c.parent_id)
+  left join @3_level d
+  on (c.id = d.parent_id)
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.2_id
+union all
+select
+  t.organizational_name,t.3_id
+from
+(
+  select
+      a.organizational_name,b.id as 1_id,c.id as 2_id,d.id as 3_id,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from @start_level a
+  left join @1_level b
+  on (a.id = b.parent_id)
+  left join @2_level c
+  on (b.id = c.parent_id)
+  left join @3_level d
+  on (c.id = d.parent_id)
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.3_id
+union all
+select
+  t.organizational_name,t.4_id
+from
+(
+  select
+      a.organizational_name,b.id as 1_id,c.id as 2_id,d.id as 3_id,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from @start_level a
+  left join @1_level b
+  on (a.id = b.parent_id)
+  left join @2_level c
+  on (b.id = c.parent_id)
+  left join @3_level d
+  on (c.id = d.parent_id)
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.4_id
+union all
+select
+  t.organizational_name,t.5_id
+from
+(
+  select
+      a.organizational_name,b.id as 1_id,c.id as 2_id,d.id as 3_id,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from @start_level a
+  left join @1_level b
+  on (a.id = b.parent_id)
+  left join @2_level c
+  on (b.id = c.parent_id)
+  left join @3_level d
+  on (c.id = d.parent_id)
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.5_id
+union all
+select
+  t.organizational_name,t.6_id
+from
+(
+  select
+      a.organizational_name,b.id as 1_id,c.id as 2_id,d.id as 3_id,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from @start_level a
+  left join @1_level b
+  on (a.id = b.parent_id)
+  left join @2_level c
+  on (b.id = c.parent_id)
+  left join @3_level d
+  on (c.id = d.parent_id)
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.6_id
+union all
+select
+ a.organizational_name,a.id
+from @start_level a
+union all
+--一级
+select
+  t.organizational_name,t.2_id
+from
+(
+  select
+      b.current_name as organizational_name,c.id as 2_id,d.id as 3_id,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from @1_level b
+  left join @2_level c
+  on (b.id = c.parent_id)
+  left join @3_level d
+  on (c.id = d.parent_id)
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.2_id
+union all
+select
+  t.organizational_name,t.3_id
+from
+(
+  select
+      b.current_name as organizational_name,c.id as 2_id,d.id as 3_id,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from @1_level b
+  left join @2_level c
+  on (b.id = c.parent_id)
+  left join @3_level d
+  on (c.id = d.parent_id)
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.3_id
+union all
+select
+  t.organizational_name,t.4_id
+from
+(
+  select
+      b.current_name as organizational_name,c.id as 2_id,d.id as 3_id,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from @1_level b
+  left join @2_level c
+  on (b.id = c.parent_id)
+  left join @3_level d
+  on (c.id = d.parent_id)
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.4_id
+union all
+select
+  t.organizational_name,t.5_id
+from
+(
+  select
+      b.current_name as organizational_name,c.id as 2_id,d.id as 3_id,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from @1_level b
+  left join @2_level c
+  on (b.id = c.parent_id)
+  left join @3_level d
+  on (c.id = d.parent_id)
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.5_id
+union all
+select
+  t.organizational_name,t.6_id
+from
+(
+  select
+      b.current_name as organizational_name,c.id as 2_id,d.id as 3_id,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from @1_level b
+  left join @2_level c
+  on (b.id = c.parent_id)
+  left join @3_level d
+  on (c.id = d.parent_id)
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.6_id
+union all
+select
+ a.current_name,a.id
+from @1_level a
+union all
+--二级
+select
+  t.organizational_name,t.3_id
+from
+(
+  select
+      c.current_name as organizational_name,d.id as 3_id,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from @2_level c
+  left join @3_level d
+  on (c.id = d.parent_id)
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.3_id
+union all
+select
+  t.organizational_name,t.4_id
+from
+(
+  select
+      c.current_name as organizational_name,d.id as 3_id,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from @2_level c
+  left join @3_level d
+  on (c.id = d.parent_id)
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.4_id
+union all
+select
+  t.organizational_name,t.5_id
+from
+(
+  select
+      c.current_name as organizational_name,d.id as 3_id,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from @2_level c
+  left join @3_level d
+  on (c.id = d.parent_id)
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.5_id
+union all
+select
+  t.organizational_name,t.6_id
+from
+(
+  select
+      c.current_name as organizational_name,d.id as 3_id,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from @2_level c
+  left join @3_level d
+  on (c.id = d.parent_id)
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.6_id
+union all
+select
+ a.current_name,a.id
+from @2_level a
+union all
+--三级
+select
+  t.organizational_name,t.4_id
+from
+(
+  select
+      d.current_name as organizational_name,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from  @3_level d
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.4_id
+union all
+select
+  t.organizational_name,t.5_id
+from
+(
+   select
+      d.current_name as organizational_name,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from  @3_level d
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.5_id
+union all
+select
+  t.organizational_name,t.6_id
+from
+(
+   select
+      d.current_name as organizational_name,e.id as 4_id,f.id as 5_id,g.id as 6_id
+  from  @3_level d
+  left join @4_level e
+  on (d.id = e.parent_id)
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.6_id
+union all
+select
+ a.current_name,a.id
+from @3_level a
+union all
+--四级
+select
+  t.organizational_name,t.5_id
+from
+(
+  select
+      e.current_name as organizational_name,f.id as 5_id,g.id as 6_id
+  from  @4_level e
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.5_id
+union all
+select
+  t.organizational_name,t.6_id
+from
+(
+   select
+      e.current_name as organizational_name,f.id as 5_id,g.id as 6_id
+  from  @4_level e
+  left join @5_level f
+  on (e.id = f.parent_id)
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.6_id
+union all
+select
+ a.current_name,a.id
+from @4_level a
+union all
+--五级
+select
+  t.organizational_name,t.6_id
+from
+(
+  select
+      f.current_name as organizational_name,g.id as 6_id
+  from  @5_level f
+  left join @6_level g
+  on (f.id = g.parent_id)
+
+) t
+group by t.organizational_name,t.6_id
+union all
+select
+ a.current_name,a.id
+from @5_level a
+union all
+-- 六级
+select
+ a.current_name,a.id
+from @6_level a
+;
+
+insert overwrite table dwd_ums_org_info partition (dt='${date}')
+select
+ t.organizational_name as parent_name,
+ t.1_id as id,
+ t1.organizational_name as child_name
+from @organizational_name_info t
+left join @ums_org_organizational t1
+on (t.1_id = t1.id)
+;

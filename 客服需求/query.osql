@@ -1,0 +1,1 @@
+select * from opdc.dw_logistics_package_shipments t where t.siteid = '49612';

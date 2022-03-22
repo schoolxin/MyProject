@@ -1,0 +1,82 @@
+--name:paypal投诉率
+--author:OrderPlus
+--create time:2021-01-19 15:30
+-- 收款
+@paypal_receive:=
+select
+  t1.paypal_shop_account,
+  t1.transaction_id,
+  t1.paypal_reference_id,
+  t1.transaction_amount_value*cct.currency_transform as receive_amount_usd,
+  to_char(t1.transaction_date,'yyyymmdd') as transaction_date,
+  t3.site_id,
+  t3.site_name,
+  t3.order_id
+from ods_looklook_mongodb_paypal_transaction_info t1
+left join (select distinct paypal_reference_id,transaction_id from ods_looklook_mongodb_paypal_transaction_info t2 where 1=1 and t2.pt = '${date}') t2
+on t1.paypal_reference_id=t2.transaction_id
+left join dwd_mapping_txn_order_site t3
+on nvl(t2.paypal_reference_id,nvl(t1.paypal_reference_id,t1.transaction_id))=t3.txn_id and t3.pay_type='paypal' and t3.pt='${date}'
+left join dwd_com_currency_transform cct
+on (t1.transaction_amount_curreny_code = cct.currency_code and cct.data_dt = to_char(t1.transaction_date,'yyyymmdd') and cct.pt = '${date}')
+where t1.pt = '${date}' and t1.transaction_event_code in ('T0000','T0006','T0011')
+and t1.transaction_amount_value>0 and to_char(t1.transaction_date,'yyyymmdd')>='20200101'
+;
+
+
+-- 投诉
+@dispute_info:=
+select
+*
+from
+(
+    select
+        reason,
+        seller_transaction_id,
+        dispute_channel,
+        dispute_life_cycle_stage,
+        dispute_currency_code,
+        dispute_amount as dispute_amount,
+        to_char(format_shopify_date(create_time),'yyyymmdd') as dispute_create_date,
+        to_char(format_shopify_date(update_time),'yyyymmdd') as dispute_update_date,
+        row_number() over(distribute by seller_transaction_id sort by create_time desc) as rn,
+        tt.dispute_id
+    from ods_looklook_mongodb_paypal_dispute_detail_info tt
+    where pt='${date}'
+
+)t4
+where t4.rn =1
+
+;
+
+
+--dispute_channel = 'INTERNAL' AND dispute_life_cycle_stage != 'CHARGEBACK'       Dispute
+--dispute_channel = 'INTERNAL' AND dispute_life_cycle_stage = 'CHARGEBACK'        Claim
+--dispute_channel = 'EXTERNAL'                                                    Chargeback
+insert overwrite table dwd_looklook_paypal_dispute_detail_info partition (pt = '${date}')
+select
+ a.site_id,
+ a.site_name,
+ a.transaction_date,
+ a.paypal_shop_account,
+ a.transaction_id,
+ b.dispute_id,
+ b.reason,
+ b.dispute_channel,
+ b.dispute_life_cycle_stage,
+ case when dispute_channel = 'INTERNAL' and dispute_life_cycle_stage='CHARGEBACK' then 1 else 0 end as if_claim,
+ case when dispute_channel = 'INTERNAL' and dispute_life_cycle_stage!='CHARGEBACK' then 1 else 0 end as if_dispute,
+ case when dispute_channel = 'EXTERNAL' then 1 else 0 end as if_chargeback,
+ a.receive_amount_usd,
+ nvl(b.dispute_amount*cct.currency_transform,0) as dispute_amount_usd,
+ nvl(b.dispute_create_date,'19700101') as dispute_create_date,
+ nvl(b.dispute_update_date,'19700101') as dispute_update_date
+from @paypal_receive a
+left join @dispute_info b
+on (a.transaction_id = b.seller_transaction_id)
+left join dwd_com_currency_transform cct
+on (nvl(b.dispute_currency_code,'CNNNNN') = cct.currency_code and cct.data_dt = nvl(a.transaction_date,'99999999') and cct.pt = '${date}')
+where a.transaction_date between '20220201' and '20220218'
+;
+
+

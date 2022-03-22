@@ -1,0 +1,154 @@
+--name:paypal订单号匹配
+--author:order
+--create time:2022-03-18 19:04
+--name:paypal未关闭的dispute_case
+--author:order
+--create time:2022-03-15 16:53
+
+@site_delivery_info_oms:=
+select
+   nvl(t.erp_order_id,t.order_id) as erp_order_ids,t.order_no
+from opdc.dwd_order_sales_process t
+group by nvl(t.erp_order_id,t.order_id),t.order_no
+union all
+select
+  nvl(t.erp_order_id,t.order_id) as erp_order_ids,t.order_no
+from popopiedc.dwd_order_sales_process t
+group by nvl(t.erp_order_id,t.order_id) ,t.order_no
+;
+
+@dispute_info:=
+select
+   a.dispute_id
+  ,to_char(format_shopify_date(a.create_time),'yyyymmdd') as create_date
+  ,to_char(format_shopify_date(a.update_time),'yyyymmdd') as update_date
+  ,a.reason
+  ,a.seller_transaction_id
+  ,a.dispute_currency_code
+  ,a.dispute_amount
+  ,a.dispute_life_cycle_stage
+  ,a.dispute_channel
+  ,b.paypal_shop_account
+  ,a.dispute_outcome
+  ,a.status
+  ,get_json_object(a.dispute_outcome,'$.outcome_code') as outcome_code
+  ,get_json_object(a.dispute_outcome,'$.amount_refunded') as amount_refunded
+  ,datediff(getdate(),format_shopify_date(a.create_time)) as day_diff
+from ods_looklook_mongodb_paypal_dispute_detail_info a
+left join (select b.transaction_id,b.paypal_shop_account from ods_looklook_mongodb_paypal_transaction_info b where b.pt = '${date}' group by b.transaction_id,b.paypal_shop_account) b
+on(a.seller_transaction_id = b.transaction_id and 1=1)
+where a.pt = '${date}'
+--and lower(a.status)!='resolved'
+;
+
+--退款数据
+@refund_info:=
+select
+  t1.transaction_id
+ ,t1.paypal_reference_id
+ ,t1.transaction_amount_value
+ ,t1.transaction_amount_curreny_code
+from ods_looklook_mongodb_paypal_transaction_info t1
+where t1.transaction_event_code = 'T1107' and t1.transaction_amount_value<0 and t1.pt= '${date}'
+;
+
+select
+  a.dispute_id as "caseID",
+  a.create_date as "case 创建日期",
+  a.update_date as "case 更新日期",
+  a.reason as "case 原因",
+  a.seller_transaction_id as "case 收款交易号",
+  a.dispute_currency_code as "case 币种",
+  a.dispute_amount as "case 金额",
+  a.dispute_life_cycle_stage as "case 阶段",
+  a.dispute_channel as "case 渠道",
+  a.paypal_shop_account as "case 收款账号",
+  a.status as "case 状态",
+  a.day_diff as "case 距离今天的天数",
+  b.transaction_amount_value as "退款金额",
+  b.transaction_amount_curreny_code as "退款币种",
+  cct.currency_transform as currency_to_usd,
+  io.order_no
+from @dispute_info a
+left join @refund_info b
+on (a.seller_transaction_id = b.paypal_reference_id)
+left join dwd_mapping_txn_order_site c
+on (a.seller_transaction_id = c.txn_id and c.pt = '${date}' and c.pay_type = 'paypal')
+left join dwd_mapping_erp_order_id d
+on (c.order_id = d.site_order_id and d.pt = '${date}')
+left join @site_delivery_info_oms io
+on (d.erp_order_id = io.erp_order_ids)
+left join dwd_com_currency_transform cct
+on (a.create_date = cct.data_dt and a.dispute_currency_code = cct.currency_code and cct.pt = '${date}')
+where a.dispute_id  in (
+'PP-D-141477403',
+'PP-D-141490593',
+'PP-D-141387030',
+'PP-D-140852779',
+'PP-D-142030680',
+'PP-D-141943094',
+'PP-D-141794246',
+'PP-D-141696934',
+'PP-D-141670637',
+'PP-D-142271636',
+'PP-D-142105393',
+'PP-D-142005677',
+'PP-D-141946857',
+'PP-D-141433405',
+'PP-D-142061940',
+'PP-D-141197592',
+'PP-D-141607096',
+'PP-D-141794566',
+'PP-D-141939225',
+'PP-D-142064604',
+'PP-D-141991651',
+'PP-D-142302892',
+'PP-D-141785257',
+'PP-D-141331671',
+'PP-D-141052303',
+'PP-D-141444753',
+'PP-D-140347016',
+'PP-D-141071666',
+'PP-D-142293715',
+'PP-D-142227919',
+'PP-D-142059857',
+'PP-D-141053310',
+'PP-D-140688412',
+'PP-D-139545214',
+'PP-D-142300540',
+'PP-D-142299649',
+'PP-D-142358448',
+'PP-D-142291657',
+'PP-D-142284005',
+'PP-D-142159668',
+'PP-D-142167518',
+'PP-D-142069297',
+'PP-D-142059881',
+'PP-D-141941275',
+'PP-D-141761567',
+'PP-D-141664782',
+'PP-D-141562651',
+'PP-D-141575675',
+'PP-D-141567339',
+'PP-D-141493683',
+'PP-D-141460973',
+'PP-D-141393671',
+'PP-D-141390860',
+'PP-D-141450988',
+'PP-D-141394371',
+'PP-D-141256967',
+'PP-D-141267246',
+'PP-D-141323650',
+'PP-D-141196054',
+'PP-D-141144214',
+'PP-D-141113384',
+'PP-D-140887119',
+'PP-D-140909484',
+'PP-D-140847037',
+'PP-D-140825567',
+'PP-D-140669565',
+'PP-D-140382976'
+
+
+)
+;

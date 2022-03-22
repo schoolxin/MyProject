@@ -1,0 +1,147 @@
+--name:popopieshop退款金额占比
+--author:order
+--create time:2022-02-11 17:27
+-- worldpay
+-- 收款
+@worldpay_paid_info_pre:=
+select
+  t.date_beijing,
+  t.merchant_code,
+  t.currency_code,
+  t.administration_code,
+  t.transaction_code,
+  t.payment_method,
+  t.amount as paid_amount
+from
+(
+  select
+    a.date_beijing,
+    a.merchant_code,
+    a.currency_code,
+    a.administration_code,
+    a.status,
+    a.transaction_code,
+    a.payment_method,
+    a.amount,
+    a.commission,
+    row_number() over (partition by a.transaction_code order by a.date_beijing asc) as rn
+  from ods_looklook_mongodb_worldpay_info a
+  where a.pt = '${date}' and a.status in ('AUTHORISED','CAPTURED','SETTLED')
+) t
+where t.rn =1 and to_char(t.date_beijing,'yyyymmdd')>='20210601'
+;
+@worldpay_paid_info:=
+select
+  ip.transaction_code,
+  to_char(ip.date_beijing,'yyyymmdd') as data_dt,
+  sum(ip.paid_amount*cct.currency_transform) as paid_amount_usd,
+  sum(ip.paid_amount*cct.currency_transform_cny) as paid_amount_cny
+from @worldpay_paid_info_pre ip
+left join dwd_com_currency_transform cct
+on (ip.currency_code = cct.currency_code and cct.pt = max_pt('dwd_com_currency_transform') and to_char(ip.date_beijing,'yyyymmdd') = cct.data_dt)
+group by ip.transaction_code,to_char(ip.date_beijing,'yyyymmdd')
+;
+
+-- 退款
+@worldpay_refund_info:=
+select
+    a.transaction_code,
+    sum(a.amount*cct.currency_transform) as refund_amount_usd,
+    sum(a.amount*cct.currency_transform_cny) as refund_amount_cny
+from ods_looklook_mongodb_worldpay_info a
+left join dwd_com_currency_transform cct
+on (a.currency_code = cct.currency_code and cct.pt = max_pt('dwd_com_currency_transform') and to_char(a.date_beijing,'yyyymmdd') = cct.data_dt)
+where a.pt = '${date}' and a.status = 'REFUNDED'
+group by a.transaction_code
+;
+
+@worldpay_paid_refund_info:=
+select
+  pi.data_dt,
+  pi.transaction_code,
+  pi.paid_amount_cny,
+  nvl(abs(ri.refund_amount_cny),0) as refund_amount_cny,
+  pi.paid_amount_usd,
+  nvl(abs(ri.refund_amount_usd),0) as refund_amount_usd
+from @worldpay_paid_info pi
+left join @worldpay_refund_info ri
+on (pi.transaction_code = ri.transaction_code)
+left join dwd_mapping_txn_order_site t2
+on pi.transaction_code=t2.txn_id and t2.pay_type='worldpay' and t2.pt='${date}'
+where t2.site_id = '18578';
+;
+
+-- paypal
+--收款
+@paypal_paid_info:=
+select
+  t3.order_id,
+  sum(t1.transaction_amount_value*cct.currency_transform) as paid_amount_usd,
+  sum(t1.transaction_amount_value*cct.currency_transform_cny) as paid_amount_cny,
+  to_char(t1.transaction_date,'yyyymmdd') as transaction_date
+from ods_looklook_mongodb_paypal_transaction_info t1
+left join (select distinct paypal_reference_id,transaction_id from ods_looklook_mongodb_paypal_transaction_info t2 where 1=1 and t2.pt = '${date}') t2
+on t1.paypal_reference_id=t2.transaction_id
+left join dwd_mapping_txn_order_site t3
+on nvl(t2.paypal_reference_id,nvl(t1.paypal_reference_id,t1.transaction_id))=t3.txn_id and t3.pay_type='paypal' and t3.pt='${date}'
+left join dwd_com_currency_transform cct
+on (t1.transaction_amount_curreny_code = cct.currency_code and cct.data_dt = to_char(t1.transaction_date,'yyyymmdd') and cct.pt = '${date}')
+where t1.pt = '${date}' and t1.transaction_event_code in ('T0000','T0006','T0011')
+and t1.transaction_amount_value>0 and to_char(t1.transaction_date,'yyyymmdd')>='20210601'
+and t3.site_id = '18578'
+group by t3.order_id,to_char(t1.transaction_date,'yyyymmdd')
+;
+
+
+-- 退款
+@paypal_refund_info:=
+select
+  t3.order_id,
+  sum(t1.transaction_amount_value*cct.currency_transform) as refund_amount_usd,
+  sum(t1.transaction_amount_value*cct.currency_transform_cny) as refund_amount_cny
+from ods_looklook_mongodb_paypal_transaction_info t1
+left join (select distinct paypal_reference_id,transaction_id from ods_looklook_mongodb_paypal_transaction_info t2 where 1=1 and t2.pt = '${date}') t2
+on t1.paypal_reference_id=t2.transaction_id
+left join dwd_mapping_txn_order_site t3
+on nvl(t2.paypal_reference_id,nvl(t1.paypal_reference_id,t1.transaction_id))=t3.txn_id and t3.pay_type='paypal' and t3.pt='${date}'
+left join dwd_com_currency_transform cct
+on (t1.transaction_amount_curreny_code = cct.currency_code and cct.data_dt = to_char(t1.transaction_date,'yyyymmdd') and cct.pt = '${date}')
+where t1.pt = '${date}' and t1.transaction_event_code in ('T1107')
+and t1.transaction_amount_value<0
+and t3.site_id = '18578'
+group by t3.order_id
+;
+@paypal_paid_refund_info:=
+select
+  pi.order_id,
+  pi.transaction_date as data_dt,
+  pi.paid_amount_cny,
+  nvl(ri.refund_amount_cny,0) as refund_amount_cny,
+  pi.paid_amount_usd,
+  nvl(ri.refund_amount_usd,0) as refund_amount_usd
+from @paypal_paid_info pi
+left join @paypal_refund_info ri
+on (pi.order_id = ri.order_id)
+;
+
+
+select
+  substring(pri.data_dt,1,6) as data_month
+ ,sum(pri.paid_amount_cny) as paid_amount_cny
+ ,sum(pri.paid_amount_usd) as paid_amount_usd
+ ,sum(pri.refund_amount_cny) as refund_amount_cny
+ ,sum(pri.refund_amount_usd) as refund_amount_usd
+ ,'worldpay' as pay_type
+from @worldpay_paid_refund_info pri
+group by substring(pri.data_dt,1,6)
+union all
+select
+  substring(pri.data_dt,1,6) as data_month
+ ,sum(pri.paid_amount_cny) as paid_amount_cny
+ ,sum(pri.paid_amount_usd) as paid_amount_usd
+ ,sum(pri.refund_amount_cny) as refund_amount_cny
+ ,sum(pri.refund_amount_usd) as refund_amount_usd
+ ,'paypal' as pay_type
+from @paypal_paid_refund_info pri
+group by substring(pri.data_dt,1,6)
+;

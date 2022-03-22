@@ -1,0 +1,384 @@
+--name:paypal支付订单数据
+--author:order
+--create time:2022-03-21 16:42
+@site_receipt_info_oms:=
+select
+    upper(t.expressno) as expressno
+   ,t.receipttime
+from
+(
+    select
+      t.expressno
+     ,t.receipttime
+     ,row_number() over (partition by t.expressno,t.receipttime order by t.levels asc) as rn
+    from
+    (
+      select
+        lpr.expressno
+       ,lpr.receipttime
+       ,1 as levels
+      from opdc.dw_logistics_package_received lpr
+      group by
+        lpr.expressno
+       ,lpr.receipttime
+      union all
+      select
+        lpr.expressno
+       ,lpr.receipttime
+       ,2 as levels
+      from ods_erp_erp_popopie_logistics_trace lpr
+      where lpr.pt = '${date}'
+      group by
+        lpr.expressno
+       ,lpr.receipttime
+    ) t
+) t
+where t.rn =1
+
+;
+@site_delivery_info_oms:=
+select
+     t.erp_order_id
+    ,concat_ws(",",collect_list(t.expressno)) as  expressno
+    ,concat_ws(",",collect_list(t.company_name)) as  company_name
+    ,sum(if(t.deliverytime is not null,1,0)) as delivery_cnt
+    ,sum(if(t.receipttime is not null,1,0)) as receipt_cnt
+from
+(
+    select
+     nvl(t.erp_order_id,t.order_id) as erp_order_id
+    ,lps.expressno
+    ,lps.deliverytime
+    ,rio.receipttime
+    ,lps.company_name
+  from opdc.dw_logistics_package_shipments lps --opdc 网红订单在erp中创建的  该表中新数据没有网红订单 所以无需过滤
+  inner join (select t.order_id,t.erp_order_id from opdc.dwd_order_sales_process t group by t.order_id,t.erp_order_id) t
+  on (string(lps.order_id) = nvl(t.order_id,t.erp_order_id))
+  left join @site_receipt_info_oms rio
+  on (upper(lps.expressno) = rio.expressno)
+  group by
+     nvl(t.erp_order_id,t.order_id)
+    ,lps.expressno
+    ,lps.deliverytime
+    ,rio.receipttime
+    ,lps.company_name
+  union all
+  select
+     nvl(t.erp_order_id,t.order_id) as erp_order_id
+    ,lps.expressno
+    ,lps.deliverytime
+    ,rio.receipttime
+    ,lps.company_name
+  from popopiedc.dw_logistics_package_shipments lps
+  inner join (select t.order_id,t.erp_order_id from popopiedc.dwd_order_sales_process t group by t.order_id,t.erp_order_id) t
+  on (string(lps.order_id) = nvl(t.order_id,t.erp_order_id))
+  left join @site_receipt_info_oms rio
+  on (upper(lps.expressno) = rio.expressno)
+  group by
+     nvl(t.erp_order_id,t.order_id)
+    ,lps.expressno
+    ,lps.deliverytime
+    ,rio.receipttime
+    ,lps.company_name
+) t
+group by
+     t.erp_order_id
+;
+--paypal 交易数据
+@paypal_receive:=
+select
+   nvl(t3.order_id,'0') as order_id
+  ,sum(t1.transaction_amount_value*cct.currency_transform) as receive_amount_usd
+from ods_looklook_mongodb_paypal_transaction_info t1
+left join (select distinct paypal_reference_id,transaction_id from ods_looklook_mongodb_paypal_transaction_info t2 where 1=1 and t2.pt = '${date}') t2
+on t1.paypal_reference_id=t2.transaction_id
+left join dwd_mapping_txn_order_site t3
+on nvl(t2.paypal_reference_id,nvl(t1.paypal_reference_id,t1.transaction_id))=t3.txn_id and t3.pay_type='paypal' and t3.pt='${date}'
+left join dwd_com_currency_transform cct
+on (t1.transaction_amount_curreny_code = cct.currency_code and cct.data_dt = to_char(t1.transaction_date,'yyyymmdd') and cct.pt = '${date}')
+where t1.pt = '${date}' and t1.transaction_event_code in ('T0000','T0006','T0011')
+and t1.transaction_amount_value>0 and to_char(t1.transaction_date,'yyyymmdd')>='20220101'
+group by nvl(t3.order_id,'0')
+;
+
+@dispute_info:=
+select
+    nvl(t3.order_id,'0') as order_id
+   ,sum(transaction_amount_value*cct.currency_transform) as dispute_usd
+from ods_looklook_mongodb_paypal_transaction_info t1
+left join (select distinct paypal_reference_id,transaction_id from ods_looklook_mongodb_paypal_transaction_info t2 where 1=1 and t2.pt = '${date}') t2
+on t1.paypal_reference_id=t2.transaction_id
+left join dwd_mapping_txn_order_site t3
+on nvl(t2.paypal_reference_id,nvl(t1.paypal_reference_id,t1.transaction_id))=t3.txn_id and t3.pay_type='paypal' and t3.pt='${date}'
+left join dwd_com_currency_transform cct
+on (t1.transaction_amount_curreny_code = cct.currency_code and cct.data_dt = to_char(t1.transaction_date,'yyyymmdd') and cct.pt = '${date}')
+where t1.pt='${date}' and t1.transaction_event_code in ('T1110','T1201','T1106','T1116') and t1.transaction_amount_value<0
+group by nvl(t3.order_id,'0')
+;
+;
+
+--退款
+@paypal_refunds_info:=
+select
+    nvl(t3.order_id,'0') as order_id
+   ,sum(transaction_amount_value*cct.currency_transform) as refunds_usd
+from ods_looklook_mongodb_paypal_transaction_info t1
+left join (select distinct paypal_reference_id,transaction_id from ods_looklook_mongodb_paypal_transaction_info t2 where 1=1 and t2.pt = '${date}') t2
+on t1.paypal_reference_id=t2.transaction_id
+left join dwd_mapping_txn_order_site t3
+on nvl(t2.paypal_reference_id,nvl(t1.paypal_reference_id,t1.transaction_id))=t3.txn_id and t3.pay_type='paypal' and t3.pt='${date}'
+left join dwd_com_currency_transform cct
+on (t1.transaction_amount_curreny_code = cct.currency_code and cct.data_dt = to_char(t1.transaction_date,'yyyymmdd') and cct.pt = '${date}')
+where t1.pt='${date}' and t1.transaction_event_code in ('T1107') and t1.transaction_amount_value<0
+group by nvl(t3.order_id,'0')
+;
+@paypal_trans_infos:=
+select
+   t.order_id
+  ,t.receive_amount_usd
+  ,t1.dispute_usd
+  ,t2.refunds_usd
+from @paypal_receive t
+left join @dispute_info t1
+on (t.order_id = t1.order_id)
+left join @paypal_refunds_info t2
+on (t.order_id = t2.order_id)
+where t.order_id!='0'
+;
+
+
+
+
+-- 云站
+@cloud_order_info:=
+select
+   a.id as order_id
+  ,a.order_no
+  ,b.trade_no
+  ,a.currency_code
+  ,a.total_amount
+  ,nvl(a.shipping_customer_email,a.default_customer_email) as customer_email
+  ,c.erp_order_id
+  ,d.refunds_usd
+  ,d.dispute_usd
+  ,e.expressno
+  ,e.delivery_cnt
+  ,e.receipt_cnt
+  ,d.order_id as paypal_order_id
+  ,'云站' as site_type
+from dwd_looklook_cloud_order_info a
+inner join orderplus_hk.ods_cloud_orderplus_db_tb_order b
+on (a.id = b.id and b.pt = '${date}')
+left join dwd_mapping_erp_order_id c
+on (string(a.id) = c.site_order_id and c.pt = '${date}')
+left join @paypal_trans_infos d
+on (string(a.id) = d.order_id)
+left join @site_delivery_info_oms e
+on (c.erp_order_id = e.erp_order_id)
+where a.pt = '${date}' and to_char(a.order_date,'yyyymm') = '202202'
+and a.pay_type in (1,2,3,26) and lower(a.payment_status) in ('paid','partially_refunded','refunded')
+;
+
+--berrylook
+@berrylook_order_info:=
+select
+   a.id as order_id
+  ,a.order_sn as order_no
+  ,a.txn_id as trade_no
+  ,a.currency_code
+  ,a.total_amount
+  ,nvl(a.shipping_customer_email,a.default_customer_email) as customer_email
+  ,c.erp_order_id
+  ,d.refunds_usd
+  ,d.dispute_usd
+  ,e.expressno
+  ,e.delivery_cnt
+  ,e.receipt_cnt
+  ,d.order_id as paypal_order_id
+  ,'独立站' as site_type
+from dwd_looklook_spsite_order_info a
+left join dwd_mapping_erp_order_id c
+on (string(a.order_sn) = c.site_order_id and c.pt = '${date}')
+left join @paypal_trans_infos d
+on (string(a.order_sn) = d.order_id)
+left join @site_delivery_info_oms e
+on (c.erp_order_id = e.erp_order_id)
+where a.pt = '${date}' and to_char(a.order_date,'yyyymm') = '202202'
+and lower(a.pay_name) rlike 'paypal' and a.payment_date is not null
+;
+
+-- 店匠
+@shoplazza_order_info:=
+select
+   a.id as order_id
+  ,a.order_id as order_no
+  ,a.txn_id as trade_no
+  ,a.currency_code
+  ,a.total_amount
+  ,nvl(a.shipping_customer_email,a.default_customer_email) as customer_email
+  ,c.erp_order_id
+  ,d.refunds_usd
+  ,d.dispute_usd
+  ,e.expressno
+  ,e.delivery_cnt
+  ,e.receipt_cnt
+  ,d.order_id as paypal_order_id
+  ,'店匠' as site_type
+from dwd_looklook_shoplazza_order_info a
+left join dwd_mapping_erp_order_id c
+on (string(a.id) = c.site_order_id and c.pt = '${date}')
+left join @paypal_trans_infos d
+on (string(a.id) = d.order_id)
+left join @site_delivery_info_oms e
+on (c.erp_order_id = e.erp_order_id)
+where a.pt = '${date}' and to_char(a.order_date,'yyyymm') = '202202'
+and lower(a.pay_type) rlike 'paypal' and lower(a.financial_status) in ('paid','partially_refunded','refunded')
+;
+
+-- shopify
+@shopify_order_info:=
+select
+   a.id as order_id
+  ,a.order_id as order_no
+  ,a.txn_id as trade_no
+  ,a.currency_code
+  ,a.total_amount
+  ,nvl(a.shipping_customer_email,a.default_customer_email) as customer_email
+  ,c.erp_order_id
+  ,d.refunds_usd
+  ,d.dispute_usd
+  ,e.expressno
+  ,e.delivery_cnt
+  ,e.receipt_cnt
+  ,d.order_id as paypal_order_id
+  ,'shopify' as site_type
+from dwd_looklook_shopify_order_info a
+left join dwd_mapping_erp_order_id c
+on (string(a.id) = c.site_order_id and c.pt = '${date}')
+left join @paypal_trans_infos d
+on (string(a.id) = d.order_id)
+left join @site_delivery_info_oms e
+on (c.erp_order_id = e.erp_order_id)
+where a.pt = '${date}' and to_char(a.order_date,'yyyymm') = '202202'
+and lower(a.pay_type) rlike 'paypal' and lower(a.financial_status) in ('paid','partially_refunded','refunded')
+;
+
+--shopline
+@shopline_order_info:=
+select
+   a.id as order_id
+  ,a.order_id as order_no
+  ,a.txn_id as trade_no
+  ,a.currency_code
+  ,a.total_amount
+  ,nvl(a.shipping_customer_email,a.default_customer_email) as customer_email
+  ,c.erp_order_id
+  ,d.refunds_usd
+  ,d.dispute_usd
+  ,e.expressno
+  ,e.delivery_cnt
+  ,e.receipt_cnt
+  ,d.order_id as paypal_order_id
+  ,'shopline' as site_type
+from dwd_looklook_shopline_order_info a
+left join dwd_mapping_erp_order_id c
+on (string(a.id) = c.site_order_id and c.pt = '${date}')
+left join @paypal_trans_infos d
+on (string(a.id) = d.order_id)
+left join @site_delivery_info_oms e
+on (c.erp_order_id = e.erp_order_id)
+where a.pt = '${date}' and to_char(a.order_date,'yyyymm') = '202202'
+and lower(a.pay_type) rlike 'paypal' and lower(a.financial_status) in ('paid','partially_refunded','refunded')
+;
+
+
+
+
+
+create table tmp_site_paypal_order_info
+as
+select
+   a.order_id
+  ,a.order_no as order_no
+  ,a.trade_no
+  ,a.currency_code
+  ,a.total_amount
+  ,a.customer_email
+  ,a.erp_order_id
+  ,a.refunds_usd
+  ,a.dispute_usd
+  ,a.expressno
+  ,a.delivery_cnt
+  ,a.receipt_cnt
+  ,a.paypal_order_id
+  ,a.site_type
+from @shopline_order_info a
+union all
+select
+   a.order_id
+  ,a.order_no as order_no
+  ,a.trade_no
+  ,a.currency_code
+  ,a.total_amount
+  ,a.customer_email
+  ,a.erp_order_id
+  ,a.refunds_usd
+  ,a.dispute_usd
+  ,a.expressno
+  ,a.delivery_cnt
+  ,a.receipt_cnt
+  ,a.paypal_order_id
+  ,a.site_type
+from @shopify_order_info a
+union all
+select
+   a.order_id
+  ,a.order_no as order_no
+  ,a.trade_no
+  ,a.currency_code
+  ,a.total_amount
+  ,a.customer_email
+  ,a.erp_order_id
+  ,a.refunds_usd
+  ,a.dispute_usd
+  ,a.expressno
+  ,a.delivery_cnt
+  ,a.receipt_cnt
+  ,a.paypal_order_id
+  ,a.site_type
+from @shoplazza_order_info a
+union all
+select
+   a.order_id
+  ,a.order_no as order_no
+  ,a.trade_no
+  ,a.currency_code
+  ,a.total_amount
+  ,a.customer_email
+  ,a.erp_order_id
+  ,a.refunds_usd
+  ,a.dispute_usd
+  ,a.expressno
+  ,a.delivery_cnt
+  ,a.receipt_cnt
+  ,a.paypal_order_id
+  ,a.site_type
+from @berrylook_order_info a
+union all
+select
+   string(a.order_id) as order_id
+  ,a.order_no as order_no
+  ,a.trade_no
+  ,a.currency_code
+  ,a.total_amount
+  ,a.customer_email
+  ,a.erp_order_id
+  ,a.refunds_usd
+  ,a.dispute_usd
+  ,a.expressno
+  ,a.delivery_cnt
+  ,a.receipt_cnt
+  ,a.paypal_order_id
+  ,a.site_type
+from @cloud_order_info a
+;

@@ -1,0 +1,65 @@
+--name:三级类目
+--author:order
+--create time:2021-09-18 16:06
+
+
+--select * from ods_lms_bamboo_pd_category a where a.pt = '${date}';
+
+
+--SELECT  id,parent_id FROM  ods_lms_bamboo_pd_category WHERE cn_name IN ( '男装', '女装' ) AND is_delete = 0
+--UNION ALL
+--SELECT  t.id,t.parent_id FROM ods_lms_bamboo_pd_category t
+--where parent_id in (SELECT id FROM ods_lms_bamboo_pd_category WHERE cn_name IN ( '男装', '女装' ) AND is_delete = 0)
+--and t.is_delete = 0
+--UNION ALL
+--SELECT  t.id,t.parent_id FROM ods_lms_bamboo_pd_category t where parent_id in (SELECT  t.id FROM ods_lms_bamboo_pd_category t
+--where parent_id in (SELECT id FROM ods_lms_bamboo_pd_category WHERE cn_name IN ( '男装', '女装' ) AND is_delete = 0)
+--and t.is_delete = 0
+
+@pd_category:=
+select
+ a.id,a.parent_id,a.level,a.cn_name,a.en_name
+from ods_lms_bamboo_pd_category a where a.pt = '${date}' and a.is_delete = 0;
+@category_level:=
+select
+  pc.id,pc.parent_id,2 as level
+from @pd_category pc
+union all
+select
+  pc.id,pc1.parent_id,1 as level
+from @pd_category pc
+left join @pd_category pc1
+on (pc.parent_id = pc1.id)
+union all
+select
+  pc.id,pc.id,3 as level
+from @pd_category pc
+;
+
+--select a.*,row_number() over (partition by a.id order by a.level asc) as real_level from @category_level a where a.id = 49;
+@levels:=
+select
+ t.id,t.category_id,
+ case when real_level = 1 then cn_name end as 1_level_name,
+ case when real_level = 2 then cn_name end as 2_level_name,
+ case when real_level = 3 then cn_name end as 3_level_name
+from
+(
+    select
+      a.id,b.parent_id as category_id,b.cn_name,a.level,
+      row_number() over (partition by a.id order by a.level asc) as real_level
+    from @category_level a
+    inner join @pd_category b
+    on (nvl(a.parent_id,'-999999999999') = b.id)
+--    where a.id = 49
+) t
+;
+
+select
+   t.id
+  ,concat_ws(',',collect_set(t.1_level_name)) as 1_level_name
+  ,concat_ws(',',collect_set(t.2_level_name)) as 2_level_name
+  ,concat_ws(',',collect_set(t.3_level_name)) as 3_level_name
+from @levels t
+group by t.id
+;
