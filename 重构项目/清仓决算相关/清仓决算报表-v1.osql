@@ -1,0 +1,275 @@
+--name:清仓就算报表
+--author:order
+--create time:2021-11-16 10:10
+@cleared_info:=
+select
+  to_char(t.order_id) as order_id,
+  to_char(t.sku_id) as sku_id,
+  t.if_cleared,
+  t.order_time
+from
+(
+    select
+     distinct
+     t2.order_id,
+     t1.site_id,
+     t2.sku_id,
+     substring(t3.start_clear_time,1,8) as cleared_date,
+     case when to_char(t1.add_time,'yyyymmddhhmiss')>=nvl(t3.start_clear_time,'99991231235959') and to_char(t1.add_time,'yyyymmddhhmiss') <= nvl(t3.end_clear_time,'99991231235959') then 'cleared'
+          else 'un_cleared'
+     end if_cleared,
+     t3.start_clear_time,
+     t3.end_clear_time,
+     to_char(t1.add_time,'yyyymmddhhmiss') as order_time
+  from ods_erp_erp_order_order t1
+  join ods_erp_erp_order_order_goods t2
+  on t1.id = t2.order_id and t2.pt=max_pt('ods_erp_erp_order_order_goods')
+  left join dws_product_clear_tag_info t3
+  on (t2.sku_id=t3.sku_id and t3.pt='${date}' and t3.start_clear_time<=to_char(t1.add_time,'yyyymmddhhmiss'))
+  where t1.pt = '${date}' and to_char(t1.add_time,'yyyymmdd')<'20211101'
+--  and t3.product_spu = 'SP10DI0J1RH'
+) t
+where t.if_cleared = 'cleared'
+group by
+  t.order_id,
+  t.sku_id,
+  t.if_cleared,
+  t.order_time
+union all
+select
+  t.order_id,
+  t.sku_erp_id as sku_id,
+  t.if_cleared,
+  t.order_time
+from
+(
+  select
+    osp.order_id,
+    osp.sku_erp_id,
+    osp.sku_id,
+    osp.spu_no,
+    substring(t3.start_clear_time,1,8) as cleared_date,
+       case when to_char(osp.addtime,'yyyymmddhhmiss')>=nvl(t3.start_clear_time,'99991231235959') and to_char(osp.addtime,'yyyymmddhhmiss') <= nvl(t3.end_clear_time,'99991231235959') then 'cleared'
+            else 'un_cleared'
+       end if_cleared,
+    t3.start_clear_time,
+    t3.end_clear_time,
+    to_char(osp.addtime,'yyyymmddhhmiss') as order_time
+  from opdc.dwd_order_sales_process osp
+  inner join (
+    select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+  ) ooa
+  on (osp.order_id = ooa.order_id)
+  left join dws_product_clear_tag_info t3
+  on (osp.sku_erp_id=t3.sku_id and t3.pt='${date}' and t3.start_clear_time<=to_char(osp.addtime,'yyyymmddhhmiss'))
+  where 1=1 and  osp.change_type = '下单' and to_char(osp.addtime,'yyyymmdd') >='20211101'
+--  and osp.spu_no = 'SP10DI0J1RH'
+) t
+where t.if_cleared = 'cleared'
+group by
+  t.order_id,
+  t.sku_erp_id,
+  t.if_cleared,
+  t.order_time
+;
+@erp_order_order:=
+select
+       distinct
+       to_char(eoo.site_id) as site_id,
+       to_char(eoo.id) as order_id,
+       meoi.site_order_id as site_order_id
+from ods_erp_erp_order_order eoo
+join dwd_mapping_erp_order_id meoi
+on (eoo.site_id = meoi.erp_site_id and eoo.id = meoi.erp_order_id and meoi.pt=max_pt('dwd_mapping_erp_order_id'))
+where eoo.pt = '${date}' and to_char(eoo.add_time,'yyyymmdd')<'20211101'
+union all
+select
+     distinct
+     ooa.site_id,
+     ooa.order_id,
+     meoi.site_order_id as site_order_id
+from (select site_id,order_id,add_time from opdc.dwd_order_order_appendix group by site_id,order_id,add_time) ooa
+inner join (select order_id from opdc.dwd_order_sales_process group by order_id) osp
+on (ooa.order_id = osp.order_id)
+inner join dwd_mapping_erp_order_id meoi
+on (ooa.site_id = meoi.erp_site_id and ooa.order_id = meoi.erp_order_id and meoi.pt=max_pt('dwd_mapping_erp_order_id'))
+where to_char(ooa.add_time,'yyyymmdd')>='20211101'
+;
+
+-- 收入
+@order_goods_sale_info:=
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.sku_erp_id as sku_id
+  ,sum(osp.good_price_currency*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as good_price_currency -- 订单物品总金额
+  ,sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,to_char(osp.addtime,'yyyymmdd') as order_date
+  ,osp.erp_order_id
+from opdc.dwd_order_sales_process osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where 1=1 and  osp.change_type = '下单'
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.currency_name
+  ,osp.sku_erp_id
+  ,to_char(osp.addtime,'yyyymmdd')
+  ,osp.erp_order_id
+;
+
+@weight_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.good_price_currency -- 订单物品总金额
+    ,t.current_sku_qty -- 订单物品总数量
+    ,t.currency_name
+    ,t.order_date
+    ,t.erp_order_id
+    ,sum(t.current_sku_qty) over (partition by t.order_id ) as sum_counts
+    ,sum(t.good_price_currency) over (partition by t.order_id ) as sum_amount
+from
+(
+  select
+     gsi.site_id
+    ,gsi.order_no
+    ,gsi.order_id
+    ,gsi.order_amt
+    ,gsi.sku_id
+    ,gsi.good_price_currency -- 订单物品总金额
+    ,gsi.current_sku_qty -- 订单物品总数量
+    ,gsi.currency_name
+    ,gsi.order_date
+    ,gsi.erp_order_id
+  from @order_goods_sale_info gsi
+) t
+;
+
+-- dw_logistics_package_shipments 发货表
+@price_rate_oms:=
+select
+     wp.site_id
+    ,wp.order_no
+    ,wp.order_id
+    ,wp.order_amt
+    ,wp.sku_id
+    ,wp.good_price_currency -- 订单物品总金额
+    ,wp.current_sku_qty -- 订单物品总数量
+    ,wp.currency_name
+    ,wp.sum_counts
+    ,wp.sum_amount
+    ,case when wp.sum_amount<> 0 then wp.good_price_currency/wp.sum_amount
+          when wp.sum_counts= 0 then 0
+          else current_sku_qty/sum_counts
+     end as price_rate
+    ,wp.order_date
+    ,wp.erp_order_id
+from @weight_price_oms wp
+;
+
+
+@goods_pre_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.good_price_currency -- 订单物品总金额
+    ,t.current_sku_qty -- 订单物品总数量
+    ,t.currency_name
+    ,t.sum_counts
+    ,t.sum_amount
+    ,t.price_rate
+    ,t.order_amt*t.price_rate as pre_price
+    ,t.order_date
+    ,t.erp_order_id
+from @price_rate_oms t
+;
+@site_delivery_info_oms:=
+select
+   lps.order_id
+  ,to_char(lps.deliverytime,'yyyymmdd') as delivery_date
+  ,lps.expressno
+  ,lps.skuid as skuid
+  ,lps.actualfee as logistics_cost_cny
+  ,lps.goodscount as sku_count
+  ,sum(goodscount) over (partition by order_id,expressno) as sku_count_total
+from opdc.dw_logistics_package_shipments lps
+where 1=1 and lps.deliverystatus != '清关退回'
+group by
+   lps.order_id
+  ,to_char(lps.deliverytime,'yyyymmdd')
+  ,lps.expressno
+  ,lps.skuid
+  ,lps.actualfee
+  ,lps.goodscount;
+
+@delivery_gmv_info_oms:=
+select
+  sdio.delivery_date
+ ,gpp.order_id
+ ,gpp.order_no
+ ,sdio.skuid
+ ,sdio.expressno
+ ,sdio.sku_count as sku_count_delivery
+ ,gpp.pre_price
+ ,gpp.currency_name
+ ,gpp.order_amt
+ ,gpp.price_rate
+ ,gpp.good_price_currency
+ ,gpp.current_sku_qty
+ ,gpp.site_id
+ ,gpp.order_date
+ ,nvl(ci.if_cleared,'un_cleared') as if_cleared
+ ,(sdio.sku_count/sdio.sku_count_total) * sdio.logistics_cost_cny as sku_logistics_cost_cny
+ ,sku_count_total as sku_count_total_delivery
+ ,sdio.logistics_cost_cny
+from @site_delivery_info_oms sdio
+inner join @goods_pre_price_oms gpp
+on (sdio.order_id = gpp.erp_order_id and sdio.skuid = gpp.sku_id)
+left join @cleared_info ci
+on (gpp.sku_id = ci.sku_id and gpp.order_id = ci.order_id)
+;
+
+
+
+@gmv_site_order_info:=
+select
+  gio.order_id,
+  gio.site_id,
+  gio.order_date,
+  gio.delivery_date,
+  gio.order_no,
+  gio.currency_name,
+  sum(gio.pre_price*(gio.sku_count_delivery/gio.current_sku_qty)) as order_total_gmv,
+  sum(if(gio.if_cleared='cleared',gio.pre_price*(gio.sku_count_delivery/gio.current_sku_qty),0)) as order_cleared_gmv,
+  sum(if(gio.if_cleared='un_cleared',gio.pre_price*(gio.sku_count_delivery/gio.current_sku_qty),0)) as order_uncleared_gmv,
+  sum(gio.sku_count_delivery) as logistics_cost_cny,
+  sum(if(gio.if_cleared='cleared',gio.sku_logistics_cost_cny,0)) as cleared_logistics_cost_cny,
+  sum(if(gio.if_cleared='un_cleared',gio.sku_logistics_cost_cny,0)) as un_cleared_logistics_cost_cny
+from @delivery_gmv_info_oms gio
+--where gio.order_date = '20211105'
+group by
+  gio.order_id,
+  gio.site_id,
+  gio.order_date,
+  gio.delivery_date,
+  gio.order_no,
+  gio.currency_name
+;
+
+
+select * from @gmv_site_order_info t;

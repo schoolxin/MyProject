@@ -1,0 +1,236 @@
+--name:清仓就算报表
+--author:order
+--create time:2021-11-16 10:10
+ -- good_price_cny
+ -- share_shipping_price_cny
+ -- share_discount_price_cny_sum/current_sku_qty as share_discount_price_cny
+@cleared_info_pre:=
+select
+   lps.skuid as sku_id
+  ,lps.order_id
+  ,osp.addtime as order_time
+from
+(
+  select
+     lps.order_id
+    ,lps.skuid
+  from opdc.dw_logistics_package_shipments lps
+  where 1=1 and lps.deliverystatus != '清关退回' and to_char(lps.deliverytime,'yyyymmdd') >= '20211101'
+  group by
+    lps.order_id
+   ,lps.skuid
+) lps
+inner join
+(
+  select
+      nvl(osp.erp_order_id,osp.order_id) as order_id
+     ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+     ,osp.addtime
+     ,osp.spu_no
+  from opdc.dwd_order_sales_process osp
+  where osp.change_type in ('下单') or (osp.change_details_type = '替换上' and osp.change_type = '换货')
+  group by
+      nvl(osp.erp_order_id,osp.order_id)
+     ,nvl(osp.sku_erp_id,osp.sku_id)
+     ,osp.addtime
+     ,osp.spu_no
+) osp
+on (lps.skuid = osp.sku_id and lps.order_id = osp.order_id)
+;
+
+
+@cleared_info:=
+select
+  t.order_id,
+  t.sku_id as sku_id,
+  t.if_cleared,
+  t.order_time
+from
+(
+  select
+    osp.order_id as order_id,
+    osp.sku_id,
+    substring(t3.start_clear_time,1,8) as cleared_date,
+    case when to_char(osp.order_time,'yyyymmddhhmiss')>=nvl(t3.start_clear_time,'99991231235959') and to_char(osp.order_time,'yyyymmddhhmiss') <= nvl(t3.end_clear_time,'99991231235959') then 'cleared'
+        else 'un_cleared'
+    end if_cleared,
+    t3.start_clear_time,
+    t3.end_clear_time,
+    to_char(osp.order_time,'yyyymmddhhmiss') as order_time
+  from @cleared_info_pre osp
+  left join dws_product_clear_tag_info t3
+  on (osp.sku_id=t3.sku_id and t3.pt='${date}' and t3.start_clear_time<=to_char(osp.order_time,'yyyymmddhhmiss'))
+  where 1=1
+--  and osp.spu_no = 'SP10DI0J1RH'
+) t
+where t.if_cleared = 'cleared'
+group by
+  t.order_id,
+  t.sku_id,
+  t.if_cleared,
+  t.order_time
+;
+
+--select * from @cleared_info;
+
+@erp_order_order:=
+select
+     distinct
+     meoi.erp_site_id as site_id,
+     meoi.erp_order_id as order_id,
+     meoi.site_order_id as site_order_id
+from dwd_mapping_erp_order_id meoi
+where meoi.pt = '${date}'
+;
+
+@site_delivery_info_oms:=
+select
+   lps.order_id
+  ,to_char(lps.deliverytime,'yyyymmdd') as delivery_date
+  ,lps.expressno
+  ,lps.skuid as skuid
+  ,lps.actualfee as logistics_cost_cny
+  ,lps.goodscount as sku_count
+  ,sum(goodscount) over (partition by order_id,expressno) as sku_count_total
+from opdc.dw_logistics_package_shipments lps
+where 1=1 and lps.deliverystatus != '清关退回'
+--and to_char(lps.deliverytime,'yyyymmdd') = '20211120'
+group by
+   lps.order_id
+  ,to_char(lps.deliverytime,'yyyymmdd')
+  ,lps.expressno
+  ,lps.skuid
+  ,lps.actualfee
+  ,lps.goodscount;
+
+
+-- 收入 使用订单物品金额作为收入
+@oms_order_info:=
+select
+     osp.addtime
+    ,nvl(osp.erp_order_id,osp.order_id) as order_id
+    ,ooa.site_id
+    ,nvl(osp.sku_erp_id,osp.sku_id)  as sku_id
+    ,osp.order_amt
+    ,osp.order_amt*cct.currency_transform_cny as order_amt_cny
+    ,osp.good_price_cny
+    ,osp.share_shipping_price_cny
+    ,osp.share_discount_price_cny_sum/osp.current_sku_qty as share_discount_price_cny
+    ,osp.share_discount_price_cny_sum
+    ,osp.current_sku_qty
+    ,osp.sales_qty
+    ,osp.change_type
+    ,osp.change_details_type
+    ,osp.order_no
+from opdc.dwd_order_sales_process osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+left join dwd_com_currency_transform cct
+on (to_char(osp.addtime,'yyyymmdd') = cct.data_dt and upper(osp.currency_name) = cct.currency_code and cct.pt = '${date}')
+where (osp.change_type in ('下单') or (osp.change_details_type = '替换上' and osp.change_type = '换货'))
+;
+
+@oms_order_goods_sales:=
+select
+  ooi.order_no
+ ,ooi.order_id
+ ,ooi.sku_id
+ ,to_char(ooi.addtime,'yyyymmdd') as order_date
+ ,ooi.order_amt_cny
+ ,ooi.site_id
+ ,sum((ooi.good_price_cny+ooi.share_shipping_price_cny-ooi.share_discount_price_cny)*if(ooi.sales_qty=0,ooi.current_sku_qty,ooi.sales_qty))
+ /sum(if(ooi.sales_qty=0,ooi.current_sku_qty,ooi.sales_qty)) as goods_sales_cny_avg
+from @oms_order_info ooi
+group by
+  ooi.order_no
+ ,ooi.order_id
+ ,ooi.sku_id
+ ,ooi.addtime
+ ,ooi.order_amt_cny
+ ,ooi.site_id
+;
+
+
+--采购
+@sku_purchase_cost:=
+select
+   ds.pms_sku_id
+  ,ds.pms_spu_id
+  ,ds.product_no
+  ,ds.avg_purchase_price
+  ,ds.supply_price
+  ,dsp.first_plate_price --第一次打版价
+  ,dsp.maximum_expected_price  --最大期望价
+  ,dsp.supply_chain_estimated_price -- 预售核价
+  ,coalesce(ds.avg_purchase_price,dsp.first_plate_price,dsp.supply_chain_estimated_price,ds.supply_price) as cost_price
+from opdc.dim_sku ds
+inner join opdc.dim_spu_price dsp
+on (ds.product_no = dsp.product_no and ds.pms_spu_id = dsp.pms_spu_id and dsp.pt= '${date}')
+;
+
+@delivery_gmv_info_oms:=
+select
+  sdio.delivery_date
+ ,gpp.order_id
+ ,gpp.order_no
+ ,sdio.skuid
+ ,sdio.expressno
+ ,sdio.sku_count as sku_count_delivery
+ ,gpp.order_amt_cny
+ ,gpp.goods_sales_cny_avg
+ ,gpp.site_id
+ ,gpp.order_date
+ ,nvl(ci.if_cleared,'un_cleared') as if_cleared
+ ,(sdio.sku_count/sdio.sku_count_total) * sdio.logistics_cost_cny as sku_logistics_cost_cny
+ ,sku_count_total as sku_count_total_delivery
+ ,sdio.logistics_cost_cny
+ ,nvl(spc.cost_price,0)*sdio.sku_count as purchase_cost
+from @site_delivery_info_oms sdio
+inner join @oms_order_goods_sales gpp
+on (sdio.order_id = gpp.order_id and sdio.skuid = gpp.sku_id)
+left join @cleared_info ci
+on (gpp.sku_id = ci.sku_id and gpp.order_id = ci.order_id)
+left join @sku_purchase_cost spc
+on (sdio.skuid = spc.pms_sku_id)
+;
+
+--select * from @delivery_gmv_info_oms t where t.delivery_date = '20211120';
+
+
+@gmv_site_order_info:=
+select
+  gio.order_id,
+  gio.site_id,
+  gio.order_date,
+  gio.delivery_date,
+  gio.order_no,
+  sum(gio.goods_sales_cny_avg*gio.sku_count_delivery) as order_total_gmv,
+  sum(if(gio.if_cleared='cleared',gio.goods_sales_cny_avg*gio.sku_count_delivery,0)) as order_cleared_gmv,
+  sum(if(gio.if_cleared='un_cleared',gio.goods_sales_cny_avg*gio.sku_count_delivery,0)) as order_uncleared_gmv,
+  sum(gio.sku_logistics_cost_cny) as logistics_cost_cny,
+  sum(if(gio.if_cleared='cleared',gio.sku_logistics_cost_cny,0)) as cleared_logistics_cost_cny,
+  sum(if(gio.if_cleared='un_cleared',gio.sku_logistics_cost_cny,0)) as un_cleared_logistics_cost_cny,
+  sum(gio.purchase_cost) as purchase_cost_cny,
+  sum(if(gio.if_cleared='cleared',gio.purchase_cost,0)) as cleared_purchase_cost_cny,
+  sum(if(gio.if_cleared='un_cleared',gio.purchase_cost,0)) as un_cleared_purchase_cost_cny
+from @delivery_gmv_info_oms gio
+--where gio.order_date = '20211105'
+group by
+  gio.order_id,
+  gio.site_id,
+  gio.order_date,
+  gio.delivery_date,
+  gio.order_no
+;
+
+
+select
+  soi.*
+from @erp_order_order eoo
+inner join @gmv_site_order_info soi
+on (eoo.order_id = soi.order_id and eoo.site_id = soi.site_id)
+where soi.delivery_date = '20211120'
+;
+

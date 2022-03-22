@@ -1,0 +1,51 @@
+--name:收入-脚本
+--author:order
+--create time:2021-11-02 14:26
+@spa_site_info:=
+-- SPA 站
+select ds.site_id,ds.ops_site_id from opdc.dim_site  ds where ds.site_type = 'SPA单页站' and ds.ops_site_id is not null
+union all
+-- 亚马逊
+select ds.site_id,ds.ops_site_id from opdc.dim_site  ds where ds.site_type = 'amazon' and ds.ops_site_id is not null
+union all
+--shopee
+select ds.site_id,ds.ops_site_id from opdc.dim_site  ds where ds.site_type = 'shopee' and ds.ops_site_id is not null
+union all
+--aliexpress myopshop
+select ds.site_id,ds.ops_site_id from opdc.dim_site  ds where ds.site_id in (519,10) and ds.ops_site_id is not null
+;
+
+@erp_spa_sale_amount :=
+select
+   to_char(osp.addtime,'yyyymmdd') as data_dt
+--  ,sum(osp.order_amt) as total_amount_currency
+--  ,ooa.site_id
+  ,ssi.ops_site_id as site_id
+  ,soi.site_type_id
+  ,soi.site_name
+  ,sum(osp.order_amt*cct.currency_transform) as total_amount_usd
+  ,sum(osp.order_amt*cct.currency_transform_cny) as total_amount_cny
+from
+(
+  select osp.addtime,osp.currency_name as currency_code ,osp.order_amt,osp.order_id
+  from opdc.dwd_order_sales_process osp
+  where osp.change_type = '下单' and osp.order_amt>0
+  group by osp.addtime,osp.currency_name,osp.order_amt,osp.order_id
+) osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+inner join @spa_site_info  ssi
+on (ooa.site_id = ssi.site_id)
+left join dwd_com_site_org_info soi
+on ssi.ops_site_id=soi.site_id and soi.pt=max_pt('dwd_com_site_org_info')
+left join dwd_com_currency_transform cct
+on to_char(osp.addtime,'yyyymmdd')=cct.data_dt and cct.currency_code= osp.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+--where to_char(osp.addtime,'yyyymmdd')>='20211001'
+group by
+   to_char(osp.addtime,'yyyymmdd')
+  ,ssi.ops_site_id
+  ,soi.site_type_id
+  ,soi.site_name
+;

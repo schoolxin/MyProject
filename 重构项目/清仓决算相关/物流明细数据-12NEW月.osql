@@ -1,0 +1,772 @@
+--name:清仓就算报表
+--author:order
+--create time:2021-11-16 10:10
+@settle_logis_fees:=
+select upper(express_no) as express_no,sum(final_freight) as final_freight
+from (
+      select f.express_no,sum(f.final_freight) as final_freight
+      from ods_erp_erp_finance_logistics_settlement_detail_full  f
+      left anti join (select express_no from ods_erp_erp_popopie_finance_logistics_settlement_detail_full where pt = '${date}' and final_freight is not null ) f1
+      on (f.express_no = f1.express_no)
+      where f.pt='${date}' and f.final_freight is not null
+      group by f.express_no
+      union all
+      select f.expressno as express_no,sum(f.confirmamount) as final_freight
+      from ods_erp_erp_finance_logistics_billdetail_full  f --线下账单
+      where f.isdeleted= 0 and f.confirmamount!=0 and f.pt = '${date}'
+      group by f.expressno
+) nt
+group by upper(express_no)
+union all
+--宝宝派暂时没有线下账单 后续加上
+select upper(express_no) as express_no,sum(final_freight) as final_freight
+from
+(
+    select f.express_no,sum(f.final_freight) as final_freight
+    from ods_erp_erp_popopie_finance_logistics_settlement_detail_full  f
+    left anti join (select express_no from ods_erp_erp_finance_logistics_settlement_detail_full where pt = '${date}' and final_freight is not null ) f1
+    on (f.express_no = f1.express_no)
+    where f.pt='${date}' and f.final_freight is not null
+    group by f.express_no
+    union all
+    select f.expressno as express_no,sum(f.confirmamount) as final_freight
+    from ods_erp_erp_popopie_finance_logistics_billdetail_full  f --线下账单
+    where f.isdeleted= 0 and f.confirmamount!=0 and f.pt = '${date}'
+    group by f.expressno
+) nt
+group by upper(express_no)
+;
+
+@cleared_info_pre:=
+select
+   lps.skuid as sku_id
+  ,osp.addtime as order_time
+  ,nvl(osp.erp_order_id,osp.order_id) as erp_order_id
+  ,osp.order_id
+from
+(
+  select
+     lps.order_id
+    ,lps.skuid
+  from opdc.dw_logistics_package_shipments lps
+  where 1=1 and lps.deliverystatus != '清关退回' and to_char(lps.deliverytime,'yyyymmdd') >= '20211101'
+  and lps.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0)
+  group by
+    lps.order_id
+   ,lps.skuid
+  union all
+  select
+     lps.order_id
+    ,lps.skuid
+  from popopiedc.dw_logistics_package_shipments lps
+  where 1=1 and lps.deliverystatus != '清关退回' and to_char(lps.deliverytime,'yyyymmdd') >= '20211101'
+  and lps.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+  group by
+    lps.order_id
+   ,lps.skuid
+) lps
+inner join
+(
+  select
+      osp.erp_order_id
+     ,osp.order_id
+     ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+     ,osp.addtime
+     ,osp.spu_no
+  from opdc.dwd_order_sales_process osp
+  where (osp.change_type in ('下单') or (osp.change_details_type = '替换上' and osp.change_type = '换货') or (osp.change_details_type = '添加补发商品' and osp.change_type = '补发'))
+  and osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0)
+  group by
+      osp.erp_order_id
+     ,osp.order_id
+     ,nvl(osp.sku_erp_id,osp.sku_id)
+     ,osp.addtime
+     ,osp.spu_no
+   union all
+   select
+      osp.erp_order_id
+     ,osp.order_id
+     ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+     ,osp.addtime
+     ,osp.spu_no
+  from popopiedc.dwd_order_sales_process osp
+  where (osp.change_type in ('下单') or (osp.change_details_type = '替换上' and osp.change_type = '换货') or (osp.change_details_type = '添加补发商品' and osp.change_type = '补发'))
+  and osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+  group by
+      osp.erp_order_id
+     ,osp.order_id
+     ,nvl(osp.sku_erp_id,osp.sku_id)
+     ,osp.addtime
+     ,osp.spu_no
+) osp
+on (lps.skuid = osp.sku_id and lps.order_id = nvl(osp.order_id,osp.erp_order_id))
+;
+
+
+@cleared_info:=
+select
+  t.order_id,
+  t.sku_id as sku_id,
+  t.if_cleared,
+  t.order_time,
+  t.erp_order_id
+from
+(
+  select
+    osp.order_id as order_id,
+    osp.sku_id,
+    substring(t3.start_clear_time,1,8) as cleared_date,
+    case when to_char(osp.order_time,'yyyymmddhhmiss')>=nvl(t3.start_clear_time,'99991231235959') and to_char(osp.order_time,'yyyymmddhhmiss') <= nvl(t3.end_clear_time,'99991231235959') then 'cleared'
+        else 'un_cleared'
+    end if_cleared,
+    t3.start_clear_time,
+    t3.end_clear_time,
+    to_char(osp.order_time,'yyyymmddhhmiss') as order_time,
+    osp.erp_order_id
+  from @cleared_info_pre osp
+  left join dws_product_clear_tag_info t3
+  on (osp.sku_id=t3.sku_id and t3.pt='${date}' and t3.start_clear_time<=to_char(osp.order_time,'yyyymmddhhmiss'))
+  where 1=1
+--  and osp.spu_no = 'SP10DI0J1RH'
+) t
+where t.if_cleared = 'cleared'
+group by
+  t.order_id,
+  t.sku_id,
+  t.if_cleared,
+  t.order_time,
+  t.erp_order_id
+;
+
+--select * from @cleared_info;
+
+
+@erp_order_order:=
+select
+     distinct
+     meoi.erp_site_id as site_id,
+     meoi.erp_order_id as order_id,
+     meoi.site_order_id as site_order_id,
+     meoi.site_id as ops_site_id,
+     meoi.site_name as ops_site_name
+from dwd_mapping_erp_order_id meoi
+where meoi.pt = '${date}'
+;
+--select a.order_id,a.site_id from @erp_order_order a group by a.order_id,a.site_id having count(1)>1;
+
+-- 收入
+-- change_details_type = '原单商品取消' and change_type = '取消' 均摊时冲抵 osp.change_type in ('下单')的金额 也就是剔除掉被替换的商品
+@order_goods_sale_info_purchase:=
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+  ,sum(abs(osp.good_price_currency)*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as good_price_currency
+  ,sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,to_char(osp.addtime,'yyyymmdd') as order_date
+  ,nvl(osp.erp_order_id,osp.order_id) as erp_order_id
+  ,to_date(osp.paytime) as pay_date
+from (
+  select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from opdc.dwd_order_sales_process osp
+  union all
+  select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from popopiedc.dwd_order_sales_process osp
+  where osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+) osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+  union all
+  select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where 1=1 and (osp.change_type in ('下单') or (osp.change_details_type = '替换上' and osp.change_type = '换货') or (osp.change_details_type = '添加补发商品' and osp.change_type = '补发'))
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.currency_name
+  ,nvl(osp.sku_erp_id,osp.sku_id)
+  ,to_char(osp.addtime,'yyyymmdd')
+  ,osp.erp_order_id
+  ,to_date(osp.paytime)
+;
+@order_goods_sale_info_cancel:=
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+  ,abs(sum(osp.good_price_currency*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty))) as good_price_currency
+  ,abs(sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty))) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,to_char(osp.addtime,'yyyymmdd') as order_date
+  ,nvl(osp.order_id,osp.erp_order_id) as erp_order_id
+  ,to_date(osp.paytime) as pay_date
+from (
+  select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id,osp.problerm_reason
+  from opdc.dwd_order_sales_process osp
+  union all
+  select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id,osp.problerm_reason
+  from popopiedc.dwd_order_sales_process osp
+  where osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+) osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+  union all
+  select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where 1=1 and ((change_details_type = '被替换商品的取消' and change_type = '取消') or (change_details_type = '原单商品取消' and change_type = '取消' and problerm_reason = '换货后取消原商品'))
+-- 补发的时候  原商品可能会取消所以添加上原商品取消的条件  依次来冲抵 原商品  保留补发的商品 --ORD-026910393
+-- 一般补发商品，原商品和补的都会发出去  所以都要承担运费
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.currency_name
+  ,nvl(osp.sku_erp_id,osp.sku_id)
+  ,to_char(osp.addtime,'yyyymmdd')
+  ,osp.erp_order_id
+  ,to_date(osp.paytime)
+;
+
+
+-- 剔除取消的商品 如果剔除后的数量为负数则置为0
+
+@order_goods_sale_info:=
+select
+   sip.site_id
+  ,sip.order_no
+  ,sip.order_id
+  ,sip.order_amt
+  ,sip.sku_id
+  ,sip.good_price_currency
+  ,sip.current_sku_qty
+  ,sip.currency_name
+  ,sip.order_date
+  ,sip.erp_order_id
+  ,sip.pay_date
+  ,nvl(sic.good_price_currency,0) as good_price_currency_cancel
+  ,nvl(sic.current_sku_qty,0) as current_sku_qty_cancel
+  ,if(sip.good_price_currency-nvl(sic.good_price_currency,0)<0,0,sip.good_price_currency-nvl(sic.good_price_currency,0)) as good_price_currency_final
+  ,if(sip.current_sku_qty-nvl(sic.current_sku_qty,0)<0,0,sip.current_sku_qty-nvl(sic.current_sku_qty,0)) as current_sku_qty_final
+from @order_goods_sale_info_purchase sip
+left join @order_goods_sale_info_cancel sic
+on (sip.order_id = sic.order_id and sip.site_id = sip.site_id and sip.sku_id = sic.sku_id)
+where to_char(sip.pay_date,'yyyymmdd') >= '20190101'
+;
+
+--select * from @order_goods_sale_info  tt where tt.order_id = '16751073';
+
+
+
+@weight_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.good_price_currency_final -- 订单物品总金额
+    ,t.current_sku_qty_final -- 订单物品总数量
+    ,t.currency_name
+    ,t.order_date
+    ,t.pay_date
+    ,t.erp_order_id
+    ,sum(t.current_sku_qty_final) over (partition by t.order_id ) as sum_counts
+    ,sum(t.good_price_currency_final) over (partition by t.order_id ) as sum_amount
+from
+(
+  select
+     gsi.site_id
+    ,gsi.order_no
+    ,gsi.order_id
+    ,gsi.order_amt
+    ,gsi.sku_id
+    ,gsi.good_price_currency -- 订单物品总金额
+    ,gsi.current_sku_qty -- 订单物品总数量
+    ,gsi.currency_name
+    ,gsi.order_date
+    ,gsi.erp_order_id
+    ,gsi.pay_date
+    ,gsi.good_price_currency_final
+    ,gsi.current_sku_qty_final
+  from @order_goods_sale_info gsi
+) t
+;
+
+-- dw_logistics_package_shipments 发货表
+@price_rate_oms:=
+select
+     wp.site_id
+    ,wp.order_no
+    ,wp.order_id
+    ,wp.order_amt
+    ,wp.sku_id
+    ,wp.good_price_currency_final -- 订单物品总金额
+    ,wp.current_sku_qty_final -- 订单物品总数量
+    ,wp.currency_name
+    ,wp.sum_counts
+    ,wp.sum_amount
+    ,case when wp.sum_amount<> 0 then wp.good_price_currency_final/wp.sum_amount
+          when wp.sum_counts= 0 then 0
+          else current_sku_qty_final/sum_counts
+     end as price_rate
+    ,wp.order_date
+    ,wp.erp_order_id
+from @weight_price_oms wp
+;
+
+
+@goods_pre_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.good_price_currency_final -- 订单物品总金额
+    ,t.current_sku_qty_final -- 订单物品总数量
+    ,t.currency_name
+    ,t.sum_counts
+    ,t.sum_amount
+    ,t.price_rate
+    ,t.order_amt*t.price_rate as pre_price
+    ,t.order_date
+    ,t.erp_order_id
+from @price_rate_oms t
+;
+@site_delivery_info_oms:=
+select
+    order_id
+   ,delivery_date
+   ,expressno
+   ,skuid
+   ,logistics_cost_cny
+   ,sku_count
+   ,sum(sku_count) over (partition by order_id,expressno) as sku_count_total
+from
+(
+  select
+     lps.order_id
+    ,to_char(lps.deliverytime,'yyyymmdd') as delivery_date
+    ,lps.expressno
+    ,lps.skuid as skuid
+    ,nvl(lf.final_freight,0) as logistics_cost_cny
+    ,sum(lps.goodscount) as sku_count
+  from opdc.dw_logistics_package_shipments lps
+  left join @settle_logis_fees lf
+  on (upper(lps.expressno) = lf.express_no)
+  where 1=1 and lps.deliverystatus != '清关退回' and to_char(lps.deliverytime,'yyyymmdd') >= '20211101'
+  and lps.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0)
+  group by
+     lps.order_id
+    ,to_char(lps.deliverytime,'yyyymmdd')
+    ,lps.expressno
+    ,lps.skuid
+    ,nvl(lf.final_freight,0)
+  -- 宝宝派数据
+  union all
+  select
+     lps.order_id
+    ,to_char(lps.deliverytime,'yyyymmdd') as delivery_date
+    ,lps.expressno
+    ,lps.skuid as skuid
+    ,nvl(lf.final_freight,0) as logistics_cost_cny
+    ,sum(lps.goodscount) as sku_count
+  from popopiedc.dw_logistics_package_shipments lps
+  left join @settle_logis_fees lf
+  on (upper(lps.expressno) = lf.express_no)
+  where 1=1 and lps.deliverystatus != '清关退回' and to_char(lps.deliverytime,'yyyymmdd') >= '20211101'
+  and lps.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+  group by
+     lps.order_id
+    ,to_char(lps.deliverytime,'yyyymmdd')
+    ,lps.expressno
+    ,lps.skuid
+    ,nvl(lf.final_freight,0)
+) lps
+;
+
+--select * from @site_delivery_info_oms t where t.sku_count_total = 0;
+--采购 替换后的
+@opdc_product_cost:=
+select
+  dsp.pms_spu_id
+ ,dsp.product_no
+ ,dsp.data_month
+ ,dsp.avg_purchase_price
+ ,ds.supply_price
+ ,ds.purchase_guide_max_price
+ ,ds.purchase_guide_min_price
+from
+(
+  select
+    substring(dsp.pt,1,6) as data_month
+   ,dsp.product_no
+   ,dsp.pms_spu_id
+   ,dsp.avg_purchase_price
+   ,row_number() over (partition by dsp.product_no,dsp.pms_spu_id,substring(dsp.pt,1,6) order by dsp.pt desc) as rn
+  from opdc.dim_spu_price dsp
+  where dsp.pt<='${date}'
+) dsp
+left join opdc.dim_spu ds
+on (dsp.product_no = ds.product_no and dsp.pms_spu_id = ds.pms_spu_id)
+where dsp.rn =1
+;
+@popopie_product_cost:=
+select
+  dsp.pms_spu_id
+ ,dsp.product_no
+ ,dsp.data_month
+ ,dsp.avg_purchase_price
+ ,ds.supply_price
+ ,ds.purchase_guide_max_price
+ ,ds.purchase_guide_min_price
+from
+(
+  select
+    substring(dsp.pt,1,6) as data_month
+   ,dsp.product_no
+   ,dsp.pms_spu_id
+   ,dsp.avg_purchase_price
+   ,row_number() over (partition by dsp.product_no,dsp.pms_spu_id,substring(dsp.pt,1,6) order by dsp.pt desc) as rn
+  from popopiedc.dim_spu_price dsp
+  where dsp.pt<='${date}'
+) dsp
+left join popopiedc.dim_spu ds
+on (dsp.product_no = ds.product_no and dsp.pms_spu_id = ds.pms_spu_id)
+where dsp.rn =1
+;
+@sku_purchase_cost:=
+select
+  cs.pms_sku_id
+ ,cs.data_month
+ ,max(cs.cost_price) as cost_price
+from
+(
+    select
+     ds.pms_sku_id
+    ,dsp.data_month
+    ,nvl(coalesce(dsp.avg_purchase_price,dsp.supply_price,purchase_guide_max_price,purchase_guide_min_price),0) as cost_price
+  from @opdc_product_cost dsp
+  inner join
+  (
+    select ds.pms_sku_id,ds.product_no,ds.pms_spu_id
+    from opdc.dim_sku ds
+    group by ds.pms_sku_id,ds.product_no,ds.pms_spu_id
+  ) ds
+  on (dsp.product_no = dsp.product_no and dsp.pms_spu_id = ds.pms_spu_id)
+  union all
+  -- 宝宝派数据
+  select
+     ds.pms_sku_id
+    ,dsp.data_month
+    ,nvl(coalesce(dsp.avg_purchase_price,dsp.supply_price,purchase_guide_max_price,purchase_guide_min_price),0) as cost_price
+  from @popopie_product_cost dsp
+  inner join
+  (
+    select ds.pms_sku_id,ds.product_no,ds.pms_spu_id
+    from popopiedc.dim_sku ds
+    group by ds.pms_sku_id,ds.product_no,ds.pms_spu_id
+  ) ds
+  on (dsp.product_no = dsp.product_no and dsp.pms_spu_id = ds.pms_spu_id)
+) cs
+group by
+  cs.pms_sku_id
+ ,cs.data_month
+;
+
+--替换前
+@replace_sku_info:=
+select
+  nvl(a.sku_erp_id,a.sku_id) as sku_erp_id,
+  nvl(a.erp_order_id,a.order_id) as erp_order_id,
+  a.sales_qty,
+  a.current_sku_qty,
+  a.change_id,
+  a.change_time,
+  a.order_id
+from opdc.dwd_order_sales_process a
+where a.change_details_type in ('替换上') and a.change_id is not null
+and a.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0)
+union all
+--宝宝派数据
+select
+  nvl(a.sku_erp_id,a.sku_id) as sku_erp_id,
+  nvl(a.erp_order_id,a.order_id) as erp_order_id,
+  a.sales_qty,
+  a.current_sku_qty,
+  a.change_id,
+  a.change_time,
+  a.order_id
+from popopiedc.dwd_order_sales_process a
+where a.change_details_type in ('替换上') and a.change_id is not null
+and a.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+--and a.erp_order_id = '16756636'
+;
+@replaced_sku_info:=
+select
+  nvl(a.sku_erp_id,a.sku_id) as sku_erp_id,
+  nvl(a.erp_order_id,a.order_id) as erp_order_id,
+  a.sales_qty,
+  a.current_sku_qty,
+  a.change_id,
+  a.change_time,
+  a.order_id
+from opdc.dwd_order_sales_process a
+where a.change_details_type in ('被替换') and a.change_id is not null
+and a.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0)
+union all
+select
+  nvl(a.sku_erp_id,a.sku_id) as sku_erp_id,
+  nvl(a.erp_order_id,a.order_id) as erp_order_id,
+  a.sales_qty,
+  a.current_sku_qty,
+  a.change_id,
+  a.change_time,
+  a.order_id
+from popopiedc.dwd_order_sales_process a
+where a.change_details_type in ('被替换') and a.change_id is not null
+and a.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+--and a.erp_order_id = '16756636'
+;
+@replace_sku_info_cnt:=
+select
+    distinct
+    a.order_id,
+    a.sku_erp_id as sku_id,
+    a.erp_order_id,
+    b.sku_erp_id as orignal_sku_id
+from @replace_sku_info a --替换
+inner join @replaced_sku_info b -- 被替换
+on (a.change_id = b.change_id and a.change_time = b.change_time and a.order_id = b.order_id and a.sku_erp_id!=b.sku_erp_id)
+;
+--select * from @replace_sku_info_cnt a where a.order_id = '27140375';
+
+@sku_delivery_info:=
+select
+  osp.order_id,
+  osp.erp_order_id,
+  lps.expressno,
+  lps.skuid,
+  lps.deliverytime,
+  sum(lps.goodscount) as goodscount
+from opdc.dw_logistics_package_shipments lps
+inner join
+(
+  select
+      nvl(osp.erp_order_id,osp.order_id) as erp_order_id
+     ,osp.order_id
+     ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+  from opdc.dwd_order_sales_process osp
+  where (osp.change_type in ('下单') or (osp.change_details_type = '替换上' and osp.change_type = '换货') or (osp.change_details_type = '添加补发商品' and osp.change_type = '补发'))
+  and osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0)
+  group by
+      osp.order_id,
+      osp.erp_order_id
+     ,nvl(osp.sku_erp_id,osp.sku_id)
+) osp
+on (lps.skuid = osp.sku_id and lps.order_id = nvl(osp.order_id,osp.erp_order_id))
+where lps.deliverystatus != '清关退回'
+and to_char(lps.deliverytime,'yyyymmdd') >='20211101'
+and lps.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0)
+group by osp.order_id,lps.expressno,lps.skuid,lps.deliverytime,osp.erp_order_id
+union all
+-- 宝宝派
+select
+  osp.order_id,
+  osp.erp_order_id,
+  lps.expressno,
+  lps.skuid,
+  lps.deliverytime,
+  sum(lps.goodscount) as goodscount
+from popopiedc.dw_logistics_package_shipments lps
+inner join
+(
+  select
+      nvl(osp.erp_order_id,osp.order_id) as erp_order_id
+     ,osp.order_id
+     ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+  from popopiedc.dwd_order_sales_process osp
+  where (osp.change_type in ('下单') or (osp.change_details_type = '替换上' and osp.change_type = '换货') or (osp.change_details_type = '添加补发商品' and osp.change_type = '补发'))
+  and osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+  group by
+      osp.order_id,
+      osp.erp_order_id
+     ,nvl(osp.sku_erp_id,osp.sku_id)
+) osp
+on (lps.skuid = osp.sku_id and lps.order_id = nvl(osp.order_id,osp.erp_order_id))
+where lps.deliverystatus != '清关退回'
+and to_char(lps.deliverytime,'yyyymmdd') >='20211101'
+and lps.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+group by osp.order_id,lps.expressno,lps.skuid,lps.deliverytime,osp.erp_order_id
+;
+--select * from @sku_delivery_info tt where tt.expressno = 'YT2134421272312326';
+-- 替换前采购成本
+@replace_sku_infos:=
+select
+  a.skuid as orignal_sku_id,
+  a.skuid as skuid,
+  a.erp_order_id as erp_order_id,
+  a.order_id,
+  a.expressno,
+  a.deliverytime,
+  a.goodscount,
+  '0' as if_replaced,
+  100 as rn
+from @sku_delivery_info a
+left anti join (select b.sku_id,b.erp_order_id from @replace_sku_info_cnt b group by b.sku_id,b.erp_order_id) b
+on (a.skuid = b.sku_id and a.erp_order_id = b.erp_order_id)
+--where a.order_id = '16917071'
+union all
+select
+    t.orignal_sku_id,
+    t.skuid,
+    t.erp_order_id,
+    t.order_id,
+    t.expressno,
+    t.deliverytime,
+    t.goodscount,
+    '1' as if_replaced,
+    t.rn
+from
+(
+  select
+    b.orignal_sku_id,
+    row_number() over (partition by a.skuid,a.order_id,a.expressno order by abs(regexp_replace(a.skuid,'[^0-9]','')-regexp_replace(b.orignal_sku_id,'[^0-9]','')) asc) as rn,
+    a.erp_order_id as erp_order_id,
+    a.order_id,
+    a.expressno,
+    a.deliverytime,
+    a.goodscount,
+    a.skuid
+  from @sku_delivery_info a
+  inner join @replace_sku_info_cnt b
+  on (a.skuid = b.sku_id and a.erp_order_id = b.erp_order_id)
+) t
+where t.rn = 1
+;
+
+
+--select * from @replace_sku_infos t where t.order_id = '27140375';
+
+@orginal_sku_cost_info:=
+select
+    a.skuid
+   ,a.erp_order_id
+   ,b.cost_price
+   ,a.goodscount
+   ,a.expressno
+   ,a.order_id
+   ,b.data_month
+from @replace_sku_infos a
+left join @sku_purchase_cost b
+on (a.orignal_sku_id = b.pms_sku_id and to_char(a.deliverytime,'yyyymm') = b.data_month)
+;
+
+
+@delivery_gmv_info_oms:=
+select
+  sdio.delivery_date
+ ,gpp.order_id
+ ,gpp.order_no
+ ,sdio.skuid
+ ,sdio.expressno
+ ,sdio.sku_count as sku_count_delivery
+ ,gpp.pre_price
+ ,gpp.currency_name
+ ,gpp.order_amt
+ ,gpp.price_rate
+ ,gpp.good_price_currency_final
+ ,gpp.current_sku_qty_final
+ ,gpp.site_id
+ ,gpp.order_date
+ ,nvl(ci.if_cleared,'un_cleared') as if_cleared
+ ,(sdio.sku_count/sdio.sku_count_total) * sdio.logistics_cost_cny as sku_logistics_cost_cny
+ ,sku_count_total as sku_count_total_delivery
+ ,sdio.logistics_cost_cny
+ ,nvl(spc.cost_price,0)*sdio.sku_count as purchase_cost
+ ,nvl(sci.cost_price*sci.goodscount,0) as purchase_cost_orginal
+ ,gpp.erp_order_id
+from @site_delivery_info_oms sdio
+inner join @goods_pre_price_oms gpp
+on (sdio.order_id = nvl(gpp.order_id,gpp.erp_order_id) and sdio.skuid = gpp.sku_id)
+left join @cleared_info ci
+on (gpp.sku_id = ci.sku_id and gpp.order_id = ci.order_id)
+left join @sku_purchase_cost spc
+on (sdio.skuid = spc.pms_sku_id and substring(sdio.delivery_date,1,6)= spc.data_month)
+left join @orginal_sku_cost_info sci
+on (sdio.skuid = sci.skuid and sdio.order_id = sci.order_id and sdio.expressno = sci.expressno)
+where sdio.sku_count!=0
+;
+
+--select * from @delivery_gmv_info_oms;
+
+
+@gmv_site_order_info:=
+select
+  gio.order_id,
+  gio.site_id,
+  gio.order_date,
+  gio.delivery_date,
+  gio.order_no,
+  gio.currency_name,
+  gio.erp_order_id,
+  gio.expressno,
+  sum(if(gio.current_sku_qty_final=0,0,gio.pre_price*(gio.sku_count_delivery/gio.current_sku_qty_final))) as order_total_gmv,
+  sum(gio.sku_logistics_cost_cny) as logistics_cost_cny,
+  sum(gio.purchase_cost) as purchase_cost_cny,
+  sum(gio.purchase_cost_orginal) as purchase_cost_cny_orginal
+from @delivery_gmv_info_oms gio
+where gio.pre_price!=0 and gio.current_sku_qty_final!=0
+group by
+  gio.order_id,
+  gio.site_id,
+  gio.order_date,
+  gio.delivery_date,
+  gio.order_no,
+  gio.currency_name,
+  gio.erp_order_id,
+  gio.expressno
+;
+
+
+select
+   eoo.ops_site_id,
+   eoo.ops_site_name,
+   soi.site_id as erp_site_id,
+   soi.delivery_date as data_dt,
+   soi.order_total_gmv*dcct.currency_transform_cny as gmv_cny,
+   soi.logistics_cost_cny as logistics_cost_cny,
+   soi.purchase_cost_cny,
+   soi.purchase_cost_cny_orginal,
+   soi.expressno,
+   soi.order_no as oms_order_no,
+   oo.order_no as erp_order_no
+from @erp_order_order eoo
+inner join @gmv_site_order_info soi
+on (eoo.order_id = soi.erp_order_id and eoo.site_id = soi.site_id)
+left join dwd_com_currency_transform dcct
+on soi.delivery_date=dcct.data_dt and upper(soi.currency_name)=dcct.currency_code and dcct.pt=max_pt('dwd_com_currency_transform')
+left join ods_erp_erp_order_order oo
+on (eoo.order_id = oo.id and oo.pt= '${date}')
+left join dwd_com_site_org_info tt
+on (eoo.ops_site_id = tt.site_id and tt.pt = '${date}')
+where soi.delivery_date between '20211201' and '20211231'
+;

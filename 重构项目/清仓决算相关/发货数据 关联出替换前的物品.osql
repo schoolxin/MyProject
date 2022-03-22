@@ -1,0 +1,150 @@
+--name:发货数据 关联出替换前的物品
+--author:order
+--create time:2021-11-18 17:36
+
+-- 16904333
+@replace_sku_info:=
+select
+  a.sku_erp_id,
+  a.erp_order_id,
+  a.sales_qty,
+  a.current_sku_qty,
+  a.change_id,
+  a.change_time,
+  a.order_id
+from opdc.dwd_order_sales_process a
+where a.change_details_type in ('替换上') and a.change_id is not null
+--and a.erp_order_id = '16756636'
+;
+@replaced_sku_info:=
+select
+  a.sku_erp_id,
+  a.erp_order_id,
+  a.sales_qty,
+  a.current_sku_qty,
+  a.change_id,
+  a.change_time,
+  a.order_id
+from opdc.dwd_order_sales_process a
+where a.change_details_type in ('被替换') and a.change_id is not null
+--and a.erp_order_id = '16756636'
+;
+
+@replace_sku_info_cnt:=
+select
+    distinct
+    a.order_id,
+    a.sku_erp_id as sku_id,
+    a.erp_order_id,
+    b.sku_erp_id as orignal_sku_id
+from @replace_sku_info a --替换
+inner join @replaced_sku_info b -- 被替换
+on (a.change_id = b.change_id and a.change_time = b.change_time and a.order_id = b.order_id and a.sku_erp_id!=b.sku_erp_id)
+;
+--select * from @replace_sku_info_cnt a where a.erp_order_id = '16834620';
+
+
+@sku_delivery_info:=
+select
+  lps.order_id,
+  lps.expressno,
+  lps.skuid,
+  lps.deliverytime,
+  lps.goodscount
+from opdc.dw_logistics_package_shipments lps
+inner join
+(
+  select
+      nvl(osp.erp_order_id,osp.order_id) as order_id
+     ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+  from opdc.dwd_order_sales_process osp
+  where (osp.change_type in ('下单') or (osp.change_details_type = '替换上' and osp.change_type = '换货'))
+  group by
+      nvl(osp.erp_order_id,osp.order_id)
+     ,nvl(osp.sku_erp_id,osp.sku_id)
+) osp
+on (lps.skuid = osp.sku_id and lps.order_id = osp.order_id)
+where lps.deliverystatus != '清关退回'
+and to_char(lps.deliverytime,'yyyymmdd') >='20211101'
+group by lps.order_id,lps.expressno,lps.skuid,lps.deliverytime,lps.goodscount
+;
+
+
+
+--select * from @sku_delivery_info tt where tt.order_id = '16834620';
+
+-- 替换前采购成本
+@replace_sku_infos:=
+select
+  a.skuid as orignal_sku_id,
+  a.skuid as skuid,
+  a.order_id as erp_order_id,
+  a.expressno,
+  a.deliverytime,
+  a.goodscount,
+  '0' as if_replaced,
+  100 as rn
+from @sku_delivery_info a
+left anti join (select b.sku_id,b.erp_order_id from @replace_sku_info_cnt b group by b.sku_id,b.erp_order_id) b
+on (a.skuid = b.sku_id and a.order_id = b.erp_order_id)
+--where a.order_id = '16917071'
+union all
+select
+    t.orignal_sku_id,
+    t.skuid,
+    t.erp_order_id,
+    t.expressno,
+    t.deliverytime,
+    t.goodscount,
+    '1' as if_replaced,
+    t.rn
+from
+(
+  select
+    b.orignal_sku_id,
+    row_number() over (partition by a.skuid,a.order_id,a.expressno) as rn,
+    a.order_id as erp_order_id,
+    a.expressno,
+    a.deliverytime,
+    a.goodscount,
+    a.skuid
+  from @sku_delivery_info a
+  inner join @replace_sku_info_cnt b
+  on (a.skuid = b.sku_id and a.order_id = b.erp_order_id)
+) t
+where t.rn = 1
+;
+
+select  * from @replace_sku_infos cc where cc.erp_order_id = '16859839';
+
+--
+--@sku_purchase_cost:=
+--select
+--   ds.pms_sku_id
+--  ,ds.pms_spu_id
+--  ,ds.product_no
+--  ,ds.avg_purchase_price
+--  ,ds.supply_price
+--  ,dsp.first_plate_price --第一次打版价
+--  ,dsp.maximum_expected_price  --最大期望价
+--  ,dsp.supply_chain_estimated_price -- 预售核价
+--  ,coalesce(ds.avg_purchase_price,dsp.first_plate_price,dsp.supply_chain_estimated_price,ds.supply_price) as cost_price
+--from opdc.dim_sku ds
+--inner join opdc.dim_spu_price dsp
+--on (ds.product_no = dsp.product_no and ds.pms_spu_id = dsp.pms_spu_id and dsp.pt= '${date}')
+--;
+--
+--@orginal_sku_cost_info:=
+--select
+--    a.skuid
+--   ,a.erp_order_id
+--   ,b.cost_price
+--   ,a.goodscount
+--   ,a.expressno
+--from @replace_sku_infos a
+--left join @sku_purchase_cost b
+--on (a.skuid = b.pms_sku_id)
+--;
+--
+--
+--select * from @orginal_sku_cost_info t where t.erp_order_id = '16644357';

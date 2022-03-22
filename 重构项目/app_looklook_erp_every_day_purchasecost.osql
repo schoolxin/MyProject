@@ -1,0 +1,184 @@
+--name:app_looklook_erp_every_day_purchasecost
+--author:OrderPlus
+--create time:2020-07-29 11:21
+@product_sku_discount_info:=
+select
+  distinct
+  b.old_no as oldno,b.id as spu_id,to_char(a.starttime,'yyyymmddhhmiss') as start_time,
+  c.id as sku_id,to_char(nvl(c.endtime,getdate()),'yyyymmddhhmiss') as end_time,
+  a.discount,
+  regexp_extract(a.discount,'(\\d)',1)/10 as discount_info
+from ods_erp_erp_product_spudiscount a
+inner join ods_erp_erp_product_spu b
+on (a.oldno = b.old_no and b.pt = '${date}')
+inner join ods_erp_erp_product_sku c
+on (b.id = c.spu_id and c.pt = '${date}')
+where a.pt = '${date}'
+;
+
+
+--select * from @product_sku_discount_info v where v.sku_id = '8564598';
+@discount_sku_info:=
+select
+  t.spu_id,t.oldno,t.sku_id,t.start_time,t.end_time,t.discount_info
+from
+(
+  select t.oldno,t.spu_id,t.sku_id,t.start_time,t.end_time,t.discount_info,row_number() over (partition by t.sku_id order by t.end_time asc)  as rn
+  from @product_sku_discount_info t
+) t
+where t.rn = 1
+;
+
+
+
+
+@avg_purchase_price:=
+select tcost.sku_id,tcost.week_avg_price,tcost.dt as data_dt
+from app_looklook_erp_every_sku_avg_purchase_price tcost
+where tcost.dt<='${date}'
+;
+
+-- 平均采购成本
+@avg_cost:=
+select  b.id as order_goods_id,nvl(c.discount_info,1)*p.week_avg_price as week_avg_price
+from ods_erp_erp_order_order_goods b
+left join ods_erp_erp_order_order a
+on b.order_id=a.id and a.pt = '${date}'
+left join @avg_purchase_price p
+on p.sku_id=b.sku_id and to_char(a.pay_time,'yyyymmdd') = p.data_dt
+left join @discount_sku_info c
+on (c.sku_id = b.sku_id and to_char(a.pay_time,'yyyymmddhhmiss')>=nvl(c.start_time,'99991231235959') and to_char(a.pay_time,'yyyymmddhhmiss')<=nvl(c.end_time,'99991231235959'))
+where to_char(a.pay_time,'yyyymmdd')<='${date}' and a.pay_type!=10 and b.pt = '${date}' and to_char(a.pay_time,'yyyymmdd')>='20200728'
+;
+
+-- 实际采购成本
+@purchase_cost:=
+select og.id as order_goods_id,og.site_id,o.pay_time,pg.cost*nvl(c.discount_info,1) as cost,
+case when og.status = 2 or o.erpstatus = 10  or o.verify_tag = 6 then 1 else 0 end is_cancel
+from ods_erp_erp_order_order_goods og
+left join ods_erp_erp_order_order o
+on o.id=og.order_id and o.pt = '${date}'
+left join ods_erp_erp_order_goods_lock_relation glr
+on glr.order_goods_id = og.id AND glr.is_delete =0 and glr.pt = '${date}'
+left join ods_erp_erp_stock_goods sg
+on sg.id = glr.stock_goods_id and sg.pt = '${date}'
+left join ods_erp_erp_purchase_goods pg
+on sg.goods_id = pg.id and pg.pt = '${date}'
+left join @discount_sku_info c
+on (c.sku_id = og.sku_id and to_char(o.pay_time,'yyyymmddhhmiss')>=nvl(c.start_time,'99991231235959') and to_char(o.pay_time,'yyyymmddhhmiss')<=nvl(c.end_time,'99991231235959'))
+where to_char(o.pay_time,'yyyymmdd')<='${date}' and  o.pay_type!=10 and og.pt = '${date}' and to_char(o.pay_time,'yyyymmdd')>='20200728';
+
+
+--- 上架时的采购成本
+@product_cost:=
+select
+  t.code,
+  case when t.produceprice != 0 then t.produceprice
+       when t.boardprice !=0 then t.boardprice
+       when t.presaleprice!=0 then t.presaleprice
+       else t.supplyprice
+  end as cost_price
+from
+(
+  select
+    spa.boardprice, --打板价格
+    spa.produceprice ,--生产价格
+    spa.maxsupplyprice,--最大预期金额
+    spa.presaleprice ,--预售价格
+    nvl(spa.supplyprice,sps.supplyprice) as supplyprice, --预期价格
+    sps.code,
+    spa.createbydate
+  from ods_opmall_opmall_supplier_product_spu sps
+  left join
+  (
+      select spa.*,row_number() over (partition by spa.pid order by spa.createbydate desc) as rn
+      from ods_opmall_opmall_supplier_product_auditprice spa
+      where spa.status = 1 and spa.isdeleted = 0 and spa.pt = '${date}'
+  ) spa
+  on (spa.pid = sps.pid and spa.rn =1)
+  where sps.pt = '${date}'
+) t
+;
+
+--select a.code,count(1) as cnt from @product_cost a group by a.code having count(1) >1;
+
+
+--- 针对老产品 取erp中的板单价 然后再取期望价格
+-- Production_PlayBoard.TotalPrice   板单总价
+-- Production_MainProcess.PlanUnitPrice 生产单单价
+-- Product_Spu.BasePrice 期望价格  这个是土豪哥 上次给我的表 你帮忙看看 是否可行
+-- 生产单价没用了就不取，有板单价就取板单价，没有就取期望价格。
+
+-- erp 板单价取多次的平均值
+
+@avg_playboard_price:=
+select
+  a.oldno,avg(a.totalprice) as avg_playboard_price
+from ods_erp_erp_production_playboard a
+where a.pt = '${date}'
+group by a.oldno
+;
+--erp 没有板单价取那就取期望价格
+@product_spu_cost:=
+select
+  ps.id,
+  ps.old_no as oldno,
+  if(nvl(app.avg_playboard_price,0)=0,ps.base_price,app.avg_playboard_price) as baseprice
+from ods_erp_erp_product_spu ps
+left join @avg_playboard_price app
+on (ps.old_no = app.oldno)
+where ps.pt = '${date}'
+;
+
+
+
+@product_online_cost:=
+select
+ a.id,
+ if(nvl(b.cost_price,0)=0,a.baseprice,b.cost_price) as baseprice
+from @product_spu_cost a
+left join @product_cost b
+on (a.oldno= b.code)
+;
+
+
+--上架的采购成本
+@spu_cost:=
+select b.id as order_goods_id,sp.baseprice*nvl(c.discount_info,1) as base_price
+from ods_erp_erp_order_order_goods b
+left join ods_erp_erp_order_order a on b.order_id=a.id and a.pt = '${date}'
+left join @product_online_cost sp on sp.id=b.spu_id
+left join @discount_sku_info c
+on (c.sku_id = b.sku_id and to_char(a.pay_time,'yyyymmddhhmiss')>=nvl(c.start_time,'99991231235959') and to_char(a.pay_time,'yyyymmddhhmiss')<=nvl(c.end_time,'99991231235959'))
+where to_char(a.pay_time,'yyyymmdd')<='${date}' AND a.pay_type!=10 and b.pt = '${date}' and to_char(a.pay_time,'yyyymmdd')>='20200728'
+;
+
+
+
+@report_every_day_purchasecost:=
+select
+  t1.site_id,
+  to_char(t1.pay_time,'yyyymmdd') as pay_time,
+  sum(case when t1.cost>0 then t1.cost
+           when t2.week_avg_price>0 and t1.is_cancel=0 then week_avg_price
+           when t3.base_price>0 and t1.is_cancel=0 then base_price
+           else 0
+       end
+      ) as purchase_cost
+from @purchase_cost t1
+left join @avg_cost t2 on (t1.order_goods_id = t2.order_goods_id)
+left join @spu_cost t3 on (t1.order_goods_id = t3.order_goods_id)
+group by t1.site_id,to_char(t1.pay_time,'yyyymmdd')
+;
+
+
+insert overwrite table app_looklook_erp_every_day_purchasecost partition(dt)
+select
+    a.site_id,
+    a.pay_time,
+    a.purchase_cost,
+    a.pay_time -- 动态分区的字段
+from @report_every_day_purchasecost a
+;
+
+

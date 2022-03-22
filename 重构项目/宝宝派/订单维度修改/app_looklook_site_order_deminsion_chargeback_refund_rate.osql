@@ -1,0 +1,583 @@
+--name:退拒比例
+--author:order
+--create time:2021-11-05 11:02
+@mapping_erp_site_info:=
+select  a.site_name,
+        a.site_id,
+        case when b.site_type_id = 4 then a.cod_erp_site_id else a.erp_site_id end as erp_site_id
+from dwd_mapping_erp_site_id a
+join ods_looklook_looklook_tb_site b
+on (a.site_id = b.id and b.pt='${date}')
+where a.pt='${date}'
+;
+@product_base_type:=
+select
+  ds.pms_spu_id,
+  dsr.base_type
+from (select ds.pms_spu_id,ds.supplier_id,row_number() over (partition by ds.pms_spu_id order by ds.pms_spu_id desc) as rn from opdc.dim_spu ds) ds
+join opdc.dim_supplier dsr
+on (ds.supplier_id = dsr.id and rn =1)
+union all
+select
+  ds.pms_spu_id,
+  dsr.base_type
+from (select ds.pms_spu_id,ds.supplier_id,row_number() over (partition by ds.pms_spu_id order by ds.pms_spu_id desc) as rn from popopiedc.dim_spu ds) ds
+join opdc.dim_supplier dsr
+on (ds.supplier_id = dsr.id and rn =1)
+;
+
+
+
+--每个sku的平均发货时效
+@order_sku_delivery_timelines:=
+select
+  t.order_id
+ ,t.skuid
+ ,avg(t.date_depart) as date_depart_avg
+from
+(
+    select
+       osp.order_id
+      ,lps.skuid
+      ,lps.delivery_date
+      ,nvl(osp.paytime,osp.addtime) as paytime
+      ,datediff(lps.delivery_date,to_date(nvl(osp.paytime,osp.addtime))) as date_depart
+  from (select lps.skuid,lps.order_id,to_date(lps.deliverytime) as  delivery_date from opdc.dw_logistics_package_shipments lps group by lps.skuid,lps.order_id,to_date(lps.deliverytime)) lps
+  inner join (select osp.order_id,osp.addtime,osp.paytime,osp.erp_order_id from opdc.dwd_order_sales_process osp group by osp.order_id,osp.addtime,osp.paytime,osp.erp_order_id) osp
+  on (lps.order_id = nvl(osp.order_id,osp.erp_order_id))
+  where to_char(osp.addtime,'yyyymmdd')>='20211101'
+  and lps.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) -- 剔除掉手工网红订单
+) t
+group by
+  t.order_id
+ ,t.skuid
+-- 宝宝派
+union all
+select
+  t.order_id
+ ,t.skuid
+ ,avg(t.date_depart) as date_depart_avg
+from
+(
+    select
+       osp.order_id
+      ,lps.skuid
+      ,lps.delivery_date
+      ,nvl(osp.paytime,osp.addtime) as paytime
+      ,datediff(lps.delivery_date,to_date(nvl(osp.paytime,osp.addtime))) as date_depart
+  from (select lps.skuid,lps.order_id,to_date(lps.deliverytime) as  delivery_date from popopiedc.dw_logistics_package_shipments lps group by lps.skuid,lps.order_id,to_date(lps.deliverytime)) lps
+  inner join (select osp.order_id,osp.addtime,osp.paytime,osp.erp_order_id from popopiedc.dwd_order_sales_process osp group by osp.order_id,osp.addtime,osp.paytime,osp.erp_order_id) osp
+  on (lps.order_id = nvl(osp.order_id,osp.erp_order_id))
+  where to_char(osp.addtime,'yyyymmdd')>='20211101'
+  and lps.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1) -- 剔除网红订单
+) t
+group by
+  t.order_id
+ ,t.skuid
+;
+
+@refund_rate_daily:=
+select
+  distinct
+  tb1.date_depart_flag
+ ,tb1.base_type
+ ,tb1.refund_rate
+ ,tb1.data_dt
+from
+(
+  select
+    /* +mapjoin (a)*/
+    a.date_depart_flag,
+    a.base_type,
+    a.refund_rate,
+    t.date_id as data_dt
+from
+(
+    select
+      to_char(date_id) as date_id
+    from dim_com_calender
+    where to_char(date_id) <= '${date}' and to_char(date_id)>='20211101'
+)t,
+(
+  select
+    distinct
+    crro.date_depart_flag
+   ,crro.base_type
+   ,crro.refund_rate
+   ,crro.start_date
+   ,crro.end_date
+  from ods_looklook_looklook_tb_category_refund_rate_order crro
+  where crro.pt = '${date}' and crro.id = -1
+) a
+where t.date_id>=a.start_date and t.date_id<a.end_date
+) tb1
+;
+
+@order_goods_sale_info:=
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt
+  ,osp.sku_id
+  ,nvl(osp.sku_erp_id,osp.sku_id) as sku_erp_id
+  ,osp.spu_id
+  ,nvl(osp.spu_erp_id,osp.spu_id) as spu_erp_id
+  ,osp.spu_no
+  ,sum(osp.good_price_currency*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as good_price_currency -- 订单物品总金额
+  ,sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,'下单' as operate_type
+  ,to_char(osp.addtime,'yyyymmdd') as order_date
+  ,osp.erp_order_id
+  ,to_date(osp.paytime) as pay_date
+from opdc.dwd_order_sales_process osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where to_char(osp.addtime,'yyyymmdd')>='20211101' and osp.change_type = '下单'
+and osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) -- 剔除网红手工订单
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0))
+  ,osp.currency_name
+  ,osp.sku_id
+  ,osp.sku_erp_id
+  ,osp.spu_id
+  ,osp.spu_erp_id
+  ,osp.spu_no
+  ,to_char(osp.addtime,'yyyymmdd')
+  ,osp.erp_order_id
+  ,to_date(osp.paytime)
+
+-- 宝宝派
+union all
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt
+  ,osp.sku_id
+  ,nvl(osp.sku_erp_id,osp.sku_id) as sku_erp_id
+  ,osp.spu_id
+  ,nvl(osp.spu_erp_id,osp.spu_id) as spu_erp_id
+  ,osp.spu_no
+  ,sum(osp.good_price_currency*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as good_price_currency -- 订单物品总金额
+  ,sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,'下单' as operate_type
+  ,to_char(osp.addtime,'yyyymmdd') as order_date
+  ,osp.erp_order_id
+  ,to_date(osp.paytime) as pay_date
+from popopiedc.dwd_order_sales_process osp
+inner join (
+  select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where to_char(osp.addtime,'yyyymmdd')>='20211101' and osp.change_type = '下单'
+and osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1) -- 剔除网红订单
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0))
+  ,osp.currency_name
+  ,osp.sku_id
+  ,osp.sku_erp_id
+  ,osp.spu_id
+  ,osp.spu_erp_id
+  ,osp.spu_no
+  ,to_char(osp.addtime,'yyyymmdd')
+  ,osp.erp_order_id
+  ,to_date(osp.paytime)
+
+;
+
+-- 取消
+@order_goods_cancel_info:=
+select
+   t.site_id
+  ,t.order_no
+  ,t.order_id
+  ,t.order_amt
+  ,t.sku_id
+  ,t.sku_erp_id
+  ,t.spu_id
+  ,t.spu_erp_id
+  ,t.spu_no
+  ,sum(t.good_price_currency*abs(t.current_sku_qty)) as good_price_currency -- 订单物品总金额
+  ,sum(t.current_sku_qty) as current_sku_qty -- 订单物品总数量
+  ,t.currency_name
+  ,'取消' as operate_type
+  ,t.order_date
+  ,t.erp_order_id
+  ,t.pay_date
+from
+(
+      select
+       ooa.site_id
+      ,osp.order_no
+      ,osp.order_id
+      ,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt
+      ,osp.sku_id
+      ,nvl(osp.sku_erp_id,osp.sku_id) as sku_erp_id
+      ,osp.spu_id
+      ,nvl(osp.spu_erp_id,osp.spu_id) as spu_erp_id
+      ,osp.spu_no
+      ,case when change_details_type = '被替换商品的取消' then -abs(good_price_currency) else abs(osp.good_price_currency) end as good_price_currency --为了剔除换货取消的商品
+      ,case when change_details_type = '被替换商品的取消' then -abs(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) else abs(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) end as current_sku_qty --为了剔除换货取消的商品
+      ,osp.currency_name
+      ,to_char(osp.addtime,'yyyymmdd') as order_date
+      ,osp.erp_order_id
+      ,to_date(osp.paytime) as pay_date
+    from opdc.dwd_order_sales_process osp
+    inner join (
+      select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+    ) ooa
+    on (osp.order_id = ooa.order_id)
+    where to_char(osp.addtime,'yyyymmdd')>='20211101' and osp.change_type = '取消'
+    and osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) --剔除网红手工订单
+    union all
+    select
+       ooa.site_id
+      ,osp.order_no
+      ,osp.order_id
+      ,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt
+      ,osp.sku_id
+      ,nvl(osp.sku_erp_id,osp.sku_id) as sku_erp_id
+      ,osp.spu_id
+      ,nvl(osp.spu_erp_id,osp.spu_id) as spu_erp_id
+      ,osp.spu_no
+      ,case when change_details_type = '被替换商品的取消' then -abs(good_price_currency) else abs(osp.good_price_currency) end as good_price_currency --为了剔除换货取消的商品
+      ,case when change_details_type = '被替换商品的取消' then -abs(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) else abs(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) end as current_sku_qty --为了剔除换货取消的商品
+      ,osp.currency_name
+      ,to_char(osp.addtime,'yyyymmdd') as order_date
+      ,osp.erp_order_id
+      ,to_date(osp.paytime) as pay_date
+    from popopiedc.dwd_order_sales_process osp
+    inner join (
+      select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+    ) ooa
+    on (osp.order_id = ooa.order_id)
+    where to_char(osp.addtime,'yyyymmdd')>='20211101' and osp.change_type = '取消'
+    and osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+)t
+group by
+   t.site_id
+  ,t.order_no
+  ,t.order_id
+  ,t.order_amt
+  ,t.currency_name
+  ,t.sku_id
+  ,t.sku_erp_id
+  ,t.spu_id
+  ,t.spu_erp_id
+  ,t.spu_no
+  ,t.order_date
+  ,t.erp_order_id
+  ,t.pay_date
+;
+@weight_price:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.sku_erp_id
+    ,t.spu_id
+    ,t.spu_erp_id
+    ,t.spu_no
+    ,t.good_price_currency -- 订单物品总金额
+    ,t.current_sku_qty -- 订单物品总数量
+    ,t.currency_name
+    ,t.operate_type
+    ,t.order_date
+    ,t.pay_date
+    ,t.erp_order_id
+    ,sum(if(t.operate_type = '取消',0,t.current_sku_qty)) over (partition by t.order_id ) as sum_counts
+    ,sum(if(t.operate_type = '取消',0,t.good_price_currency)) over (partition by t.order_id ) as sum_amount
+from
+(
+  select
+     gsi.site_id
+    ,gsi.order_no
+    ,gsi.order_id
+    ,gsi.order_amt
+    ,gsi.sku_id
+    ,gsi.sku_erp_id
+    ,gsi.spu_id
+    ,gsi.spu_erp_id
+    ,gsi.spu_no
+    ,gsi.good_price_currency -- 订单物品总金额
+    ,gsi.current_sku_qty -- 订单物品总数量
+    ,gsi.currency_name
+    ,gsi.operate_type
+    ,gsi.order_date
+    ,gsi.erp_order_id
+    ,gsi.pay_date
+  from @order_goods_sale_info gsi
+  union all
+  select
+     gci.site_id
+    ,gci.order_no
+    ,gci.order_id
+    ,gci.order_amt
+    ,gci.sku_id
+    ,gci.sku_erp_id
+    ,gci.spu_id
+    ,gci.spu_erp_id
+    ,gci.spu_no
+    ,gci.good_price_currency -- 订单物品总金额
+    ,gci.current_sku_qty -- 订单物品总数量
+    ,gci.currency_name
+    ,gci.operate_type
+    ,gci.order_date
+    ,gci.erp_order_id
+    ,gci.pay_date
+  from @order_goods_cancel_info gci
+  where gci.good_price_currency !=0   -- 剔除换货取消的
+) t
+;
+--- 只要 关联到锁库 并且 关联到库存表  订单日期在入库时间之后 就认为是库存
+--- 使用sku 平均发货时效作为订单明细表sku的发货时间  因为订单明细表中的没有物品维度 并且一个sku只有一条记录 即使该sku买了多个也只有一条数据 没法做到每一个物品找到对应的发货时间
+-- dw_logistics_package_shipments 发货表
+@price_rate:=
+select
+     wp.site_id
+    ,wp.order_no
+    ,wp.order_id
+    ,wp.order_amt
+    ,wp.sku_id
+    ,wp.sku_erp_id
+    ,wp.spu_id
+    ,wp.spu_erp_id
+    ,wp.spu_no
+    ,wp.good_price_currency -- 订单物品总金额
+    ,wp.current_sku_qty -- 订单物品总数量
+    ,wp.currency_name
+    ,wp.operate_type
+    ,wp.sum_counts
+    ,wp.sum_amount
+    ,case when wp.sum_amount<> 0 then wp.good_price_currency/wp.sum_amount
+          when wp.sum_counts= 0 then 0
+          else current_sku_qty/sum_counts
+     end as price_rate
+    ,wp.order_date
+    ,wp.pay_date
+    ,wp.erp_order_id
+    ,si.goods_lock_tm
+    ,si.lock_inventory_qty
+    ,sgh.usable_inventory_qty
+    ,case when nvl(sgh.usable_inventory_qty,0)>0 then '库存'
+          when pbt.base_type = 3               then '零采账期'
+          when pbt.base_type in(1,2,7)         then '生产'
+          else '零采现结'
+     end basetype
+    ,nvl(sdt.date_depart_avg,-999) as date_depart_avg
+    ,case
+        when datediff(to_date(getdate()),wp.pay_date)<=3 then -1
+        when datediff(to_date(getdate()),wp.pay_date)>3 and datediff(to_date(getdate()),wp.pay_date) <= 10 then 0
+        when datediff(to_date(getdate()),wp.pay_date)>=10 and datediff(to_date(getdate()),wp.pay_date)<15 then 1
+        when datediff(to_date(getdate()),wp.pay_date)>=15 and datediff(to_date(getdate()),wp.pay_date)<20 then 2
+        when datediff(to_date(getdate()),wp.pay_date)>=20 and datediff(to_date(getdate()),wp.pay_date)<25 then 3
+        else 4
+    end  date_depart_flag1
+from @weight_price wp
+left join
+(
+  -- 非宝宝派
+  select si.sku,si.order_id,si.goods_lock_tm,si.lock_inventory_qty,row_number() over (partition by si.order_id,si.sku order by si.goods_lock_tm)  as rn
+  from opdc.dw_logistics_sku_inventory si
+  left anti join (select osp.site_order_no,osp.site_id,osp.order_id from popopiedc.dw_oms_order_order osp group by osp.site_order_no,osp.site_id,osp.order_id) osp
+  on (si.site_order_no = osp.site_order_no and si.siteid = osp.site_id)
+  where si.lock_type = '锁库'
+  union all
+  -- 宝宝派
+  select si.sku,si.order_id,si.goods_lock_tm,si.lock_inventory_qty,row_number() over (partition by si.order_id,si.sku order by si.goods_lock_tm)  as rn
+  from
+  (
+        select si.sku,osp.order_id,si.goods_lock_tm,si.lock_inventory_qty
+        from opdc.dw_logistics_sku_inventory si
+        inner join (select osp.site_order_no,osp.site_id,osp.order_id from popopiedc.dw_oms_order_order osp group by osp.site_order_no,osp.site_id,osp.order_id) osp
+        on (si.site_order_no = osp.site_order_no and si.siteid = osp.site_id)
+        where si.lock_type = '锁库'
+        union all
+        select si.sku,si.order_id,si.goods_lock_tm,si.lock_inventory_qty
+        from popopiedc.dw_logistics_sku_inventory si
+        where si.lock_type = '锁库'
+   ) si
+) si
+on (nvl(wp.order_id,wp.erp_order_id) = si.order_id and wp.sku_erp_id = si.sku and si.rn = 1)
+left join (
+      select sgh.date_number,sgh.pt,sgh.skuid,sum(sgh.usable_inventory_qty) as usable_inventory_qty
+      from opdc.dw_erp_stock_goods_history sgh
+      where sgh.pt<='${date}'
+      group by sgh.pt,sgh.skuid,sgh.date_number
+      union all
+      select sgh.date_number,sgh.pt,sgh.skuid,sum(sgh.usable_inventory_qty) as usable_inventory_qty
+      from popopiedc.dw_erp_stock_goods_history sgh
+      where sgh.pt<='${date}'
+      group by sgh.pt,sgh.skuid,sgh.date_number
+) sgh -- 如果下单的前一天 有可用库存就认为是库存的
+on (si.sku = sgh.skuid and wp.order_date = to_char(date_add(sgh.date_number,1),'yyyymmdd'))
+left join @product_base_type pbt
+on (wp.spu_erp_id = pbt.pms_spu_id)
+left join @order_sku_delivery_timelines sdt
+on (wp.order_id = sdt.order_id and wp.sku_erp_id = sdt.skuid)
+;
+
+@refund_rate_pre:=
+select
+     pr.site_id
+    ,pr.order_no
+    ,pr.order_id
+    ,pr.order_amt
+    ,pr.sku_id
+    ,pr.sku_erp_id
+    ,pr.spu_id
+    ,pr.spu_erp_id
+    ,pr.spu_no
+    ,pr.good_price_currency -- 订单物品总金额
+    ,pr.current_sku_qty -- 订单物品总数量
+    ,pr.currency_name
+    ,pr.operate_type
+    ,pr.sum_counts
+    ,pr.sum_amount
+    ,pr.price_rate
+    ,pr.order_date
+    ,pr.pay_date
+    ,pr.erp_order_id
+    ,pr.goods_lock_tm
+    ,pr.lock_inventory_qty
+    ,pr.usable_inventory_qty
+    ,pr.basetype as base_type_level1
+    ,case when pr.basetype = '零采现结' then '非账期' else '账期' end  as base_type_level0
+    ,pr.date_depart_avg
+    ,pr.date_depart_flag1
+    ,case when pr.basetype = '零采现结' then 0.12
+          when pr.basetype = '生产' then 0.18
+          when pr.basetype = '零采账期' then 0.09
+          else 0.03
+     end as default_refund_rate
+    ,case
+        when pr.date_depart_avg = -999 then -999
+        when pr.date_depart_avg<=3 then -1
+        when pr.date_depart_avg>3 and pr.date_depart_avg <= 10 then 0
+        when pr.date_depart_avg>=10 and pr.date_depart_avg<15 then 1
+        when pr.date_depart_avg>=15 and pr.date_depart_avg<20 then 2
+        when pr.date_depart_avg>=20 and pr.date_depart_avg<25 then 3
+        else 4
+     end  date_depart_flag
+    ,oa.country
+from @price_rate pr
+left join (
+  select t.order_id,t.country,row_number() over (partition by t.order_id order by t.modified_date desc) as rn from opdc.dw_order_address t where t.address_type = '2'
+  union all
+  select t.order_id,t.country,row_number() over (partition by t.order_id order by t.modified_date desc) as rn from popopiedc.dw_order_address t where t.address_type = '2'
+ ) oa
+on (pr.order_id = oa.order_id and oa.rn = 1)
+;
+--where pr.order_no = 'ORD-026719199'
+
+
+@goods_refund_rate_1:=
+select
+     a.site_id
+    ,a.order_no
+    ,a.order_id
+    ,a.order_amt
+    ,a.sku_id
+    ,a.sku_erp_id
+    ,a.spu_id
+    ,a.spu_erp_id
+    ,a.spu_no
+    ,a.good_price_currency -- 订单物品总金额
+    ,a.current_sku_qty -- 订单物品总数量
+    ,a.currency_name
+    ,a.operate_type
+    ,a.sum_counts
+    ,a.sum_amount
+    ,if(a.operate_type='取消',-a.price_rate,a.price_rate) as price_rate
+    ,a.order_date
+    ,to_char(a.pay_date,'yyyymmdd')  as pay_date
+    ,a.erp_order_id
+    ,a.goods_lock_tm
+    ,a.lock_inventory_qty
+    ,a.usable_inventory_qty
+    ,a.base_type_level1
+    ,a.base_type_level0
+    ,a.date_depart_avg
+    ,a.date_depart_flag1
+    ,a.default_refund_rate
+    ,a.date_depart_flag
+    ,case when b.base_type is not null then b.refund_rate -- 如果物品发货了就按发货的比例算
+          else case when a.default_refund_rate > c.refund_rate then a.default_refund_rate else c.refund_rate end -- 如果没有发货则取预设和发货时效中最大的比例
+     end as refund_rate
+    ,cct.currency_transform_cny as to_cny
+    ,cct.currency_transform as to_usd
+    ,a.country as country
+from @refund_rate_pre a
+left join @refund_rate_daily b
+on (to_char(a.pay_date,'yyyymmdd')  = b.data_dt and a.base_type_level0 = b.base_type and a.date_depart_flag = b.date_depart_flag  and a.date_depart_avg !=-999)
+left join @refund_rate_daily c
+on (to_char(a.pay_date,'yyyymmdd') = c.data_dt and a.base_type_level0 = c.base_type and a.date_depart_flag1 = c.date_depart_flag and a.date_depart_avg =-999)
+left join dwd_com_currency_transform cct
+on (a.order_date =cct.data_dt and cct.pt = '${date}' and cct.currency_code = a.currency_name)
+;
+
+
+
+--select * from @goods_refund_rate_1 a where a.site_id = '30885' and a.order_date = '20211220';
+
+insert overwrite table  app_looklook_site_order_deminsion_chargeback_refund_rate partition(pt = '${date}')
+select
+   bigint(a.site_id) as erp_site_id
+  ,bigint(nvl(esi.site_id,0)) as site_id
+  ,nvl(esi.site_name,'other') as site_name
+  ,a.order_date
+  ,sum(a.price_rate*a.order_amt*a.to_cny) as order_gmv_cny
+  ,sum(a.price_rate*a.order_amt*a.to_usd) as order_gmv_usd
+  ,sum(a.price_rate*a.order_amt*a.refund_rate*a.to_cny) as order_refund_cny
+  ,sum(a.price_rate*a.order_amt*a.refund_rate*a.to_usd) as order_refund_usd
+from
+(
+  select
+     a.site_id
+    ,a.order_date
+    ,a.price_rate
+    ,a.order_amt
+    ,a.to_cny
+    ,a.to_usd
+    ,case when nvl(a.country,'other') in ('US') then a.refund_rate
+          when nvl(a.country,'other') in ('CA') then a.refund_rate*0.9
+          else a.refund_rate*0.8
+     end as refund_rate
+  from @goods_refund_rate_1 a
+  where a.pay_date<'20211118'
+  union all
+  select
+     a.site_id
+    ,a.pay_date as order_date
+    ,a.price_rate
+    ,a.order_amt
+    ,a.to_cny
+    ,a.to_usd
+    ,case when nvl(a.country,'other') in ('US') then a.refund_rate
+          when nvl(a.country,'other') in ('CA') then a.refund_rate*0.9
+          else a.refund_rate*0.8
+     end as refund_rate
+  from @goods_refund_rate_1 a
+  where a.pay_date>='20211118'
+) a
+inner join @mapping_erp_site_info esi
+on (a.site_id = esi.erp_site_id)
+group by
+   a.site_id
+  ,nvl(esi.site_id,0)
+  ,nvl(esi.site_name,'other')
+  ,a.order_date
+;

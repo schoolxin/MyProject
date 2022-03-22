@@ -1,0 +1,37 @@
+标品和非标品
+根据LMS系统中商品的仓储物流属性来判断：
+只勾选普货的就套用非标品逻辑，有勾选其他的就套用标品逻辑
+select a.product_no,if(a.stock_logistics_attribute=1,'0','1') as is_standard from opdc.dim_spu a; 标品判断逻辑
+-- 目前已经没有广告测试阶段了 因此新逻辑中可以不用管这块
+-- 同一天测试成功的spu 取最早的一次测试成功日期
+select
+   stf.product_no
+  ,to_char(stf.production_end_time,'yyyymmddhhmiss') as production_end_time
+  ,row_number() over (partition by t.product_no,to_char(stf.production_end_time,'yyyymmdd') order by t.production_end_time asc) as rn
+from opdc.ods_bamboo_bamboo_pd_spu_test_form stf
+inner join opdc.ods_bamboo_bamboo_common_dictionary   bcd
+on (stf.production_status = bcd.value and bcd.group_identification = 'productTestSubStatus')
+where bcd.name ='生产测试通过';
+
+-- 每天取首次入库记录
+select
+  t.product_no
+ ,t.in_date
+from
+(
+    select
+    t.spuid,
+    t1.old_no as product_no,
+    to_char(t.intime,'yyyymmddhhmiss') as in_date,
+    row_number() over (partition by t.spuid,to_char(t.intime,'yyyymmdd') order by t.intime asc) as rn
+  from ods_erp_erp_stock_goodsin t
+  inner join ods_erp_erp_product_spu t1
+  on (t.spuid = t1.id and t1.pt = '${date}')
+  where t.pt = '${date}'
+) t
+where t.rn = 1
+;
+取每次测试成功日期最近的一次入库日期作为endtime,测试成功日期作为starttime   然后再进行链表 多个记录间起始和终止 闭合
+
+
+--

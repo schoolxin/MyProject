@@ -1,0 +1,443 @@
+--name:dwd_mapping_erp_order_id
+--author:order
+--create time:2021-11-02 14:45
+--name:etl_dwd_mapping_erp_order_id
+--author:order
+--create time:2019-06-04 17:30
+
+
+--===================shopify 订单匹配===============================
+-- 填写完整的订单信息
+@orderlist1:=
+select
+   distinct
+   eoo.id as erp_order_id
+  ,case when nvl(eoo.site_order_id,0) = 0 then site_order_id_nav else site_order_id end as site_order_id
+  ,soi.site_id
+  ,soi.site_name
+  ,eoo.site_id as erp_site_id
+  ,ess.short_name as erp_site_name
+  ,eoo.add_time as erp_order_date
+  ,'shopify' as site_type
+from ods_erp_erp_order_order eoo
+inner join dwd_looklook_shopify_order_info soi
+on case when nvl(eoo.site_order_id,0) = 0 then site_order_id_nav else site_order_id end=soi.id and soi.pt='${date}'
+left join ods_erp_erp_sys_site ess
+on eoo.site_id=ess.site_id and ess.pt=max_pt('ods_erp_erp_sys_site')
+where eoo.pt='${date}'
+and nvl(to_char(eoo.site_order_id),eoo.site_order_id_nav) is not null;
+
+
+--通过交易号取得的订单映射信息
+
+@erp_order_transaction:=
+select
+    trans_array(3,',',id,site_id,add_time,tx) as (erp_order_id,erp_site_id,erp_order_date,transaction_id)
+from ods_erp_erp_order_order
+where pt='${date}'
+and tx is not null
+and tx!='';
+
+
+@orderlist2:=
+select distinct
+   t2.erp_order_id  as erp_order_id
+  ,to_char(t1.order_id) as site_order_id
+  ,tom.site_id
+  ,lower(nvl(site.site_name,'other')) as site_name
+  ,t2.erp_site_id
+  ,ess.short_name as erp_site_name
+  ,t2.erp_order_date
+  ,'shopify' as site_type
+from ods_looklook_mongodb_shopify_transaction t1
+inner join @erp_order_transaction t2
+on t1.authorization=t2.transaction_id
+left join dwd_loolook_shopify_to_ops_mapping tom
+on (lower(t1.site_name) = lower(tom.shopify_site_name) and tom.pt = max_pt('dwd_loolook_shopify_to_ops_mapping'))
+left join ods_looklook_looklook_tb_site site
+on (tom.site_id = site.id and site.pt = '${date}')
+left join ods_erp_erp_sys_site ess
+on t2.erp_site_id=ess.site_id and ess.pt=max_pt('ods_erp_erp_sys_site')
+left anti join @orderlist1 ol1
+on t1.order_id=ol1.site_order_id
+where t1.pt='${date}';
+
+
+@orderlist1_1:=
+select
+   distinct
+   eoo.id as erp_order_id
+  ,soi.id as site_order_id
+  ,soi.site_id
+  ,soi.site_name
+  ,eoo.site_id as erp_site_id
+  ,ess.short_name as erp_site_name
+  ,eoo.add_time as erp_order_date
+  ,'shopify' as site_type
+from ods_erp_erp_order_order eoo
+inner join dwd_looklook_shopify_order_info soi
+on eoo.order_no = soi.order_id and soi.pt='${date}'
+left join ods_erp_erp_sys_site ess
+on eoo.site_id=ess.site_id and ess.pt=max_pt('ods_erp_erp_sys_site')
+left anti join (select site_order_id from @orderlist2 union all select site_order_id from @orderlist1) ol2
+on soi.id=ol2.site_order_id
+where eoo.pt='${date}'
+;
+
+
+--===================shopify 订单匹配===============================
+
+
+---==================云站订单数据匹配===============================
+@orderlist3:=
+select
+    distinct
+    eoo.id as erp_order_id
+   ,to_char(coi.id) as site_order_id
+   ,coi.site_id
+   ,coi.site_name
+   ,coi.erp_site_id as erp_site_id
+   ,ess.short_name as erp_site_name
+   ,eoo.add_time as erp_order_date
+   ,'cloud' as site_type
+from dwd_looklook_cloud_order_info coi
+inner join ods_erp_erp_order_order eoo
+on coi.erp_site_id=eoo.site_id and coi.order_no=eoo.order_no and eoo.pt='${date}'
+left join ods_erp_erp_sys_site ess
+on coi.erp_site_id=ess.site_id and ess.pt=max_pt('ods_erp_erp_sys_site')
+where coi.pt='${date}'
+and coi.site_id is not null;
+---==================云站订单数据匹配===============================
+
+---==================独立站订单数据匹配===============================
+@orderlist4:=
+select
+    distinct
+    eoo.id as erp_order_id
+   ,soi.order_sn as site_order_id
+   ,soi.site_id
+   ,soi.site_name
+   ,soi.erp_site_id as erp_site_id
+   ,ess.short_name as erp_site_name
+   ,eoo.add_time as erp_order_date
+   ,'spsite' as site_type
+from
+(
+    select
+       t.order_sn,
+       t.site_id,t.site_name,t.erp_site_id,
+       row_number() over (partition by t.site_id,t.order_id order by t.payment_date desc) as rn
+    from
+    (
+    select soi.order_sn,soi.erp_site_id,soi.payment_date,soi.order_id,
+    soi.site_name,
+    soi.site_id
+    from dwd_looklook_spsite_order_info soi
+    where soi.pt='${date}'and soi.site_id is not null
+    ) t
+) soi
+inner join ods_erp_erp_order_order eoo
+on soi.erp_site_id=eoo.site_id and soi.order_sn=eoo.order_no and eoo.pt='${date}'
+left join ods_erp_erp_sys_site ess
+on soi.erp_site_id=ess.site_id and ess.pt=max_pt('ods_erp_erp_sys_site')
+where soi.rn =1;
+---==================独立站订单数据匹配===============================
+
+---==================shoplazza订单匹配 start===============================
+@shoplazza_order:=
+select
+   distinct
+   eoo.id as erp_order_id
+  ,soi.id as site_order_id
+  ,soi.site_id
+  ,soi.site_name
+  ,eoo.site_id as erp_site_id
+  ,ess.short_name as erp_site_name
+  ,eoo.add_time as erp_order_date
+  ,'shoplazza' as site_type
+from ods_erp_erp_order_order eoo
+inner join dwd_looklook_shoplazza_order_info soi
+on eoo.site_order_id_nav=soi.id and soi.pt='${date}'
+join ods_erp_erp_sys_site ess
+on eoo.site_id=ess.site_id and ess.pt=max_pt('ods_erp_erp_sys_site')
+where eoo.pt='${date}'
+;
+
+---==================shoplazza订单匹配 end===============================
+
+
+---==================新增独立站订单数据匹配===============================
+@orderlist5:=
+select
+    distinct
+    eoo.id as erp_order_id
+   ,to_char(coi.id) as site_order_id
+   ,coi.site_id
+   ,coi.site_name
+   ,eoo.site_id as erp_site_id
+   ,ess.short_name as erp_site_name
+   ,eoo.add_time as erp_order_date
+   ,'Mshop' as site_type
+from dwd_looklook_self_site_order_info coi
+inner join ods_erp_erp_order_order eoo
+on coi.order_no=eoo.order_no and eoo.pt='${date}'
+inner join ods_erp_erp_sys_site ess
+on eoo.site_id=ess.site_id and ess.site_type = '18' and ess.pt=max_pt('ods_erp_erp_sys_site')
+where coi.pt='${date}'
+and coi.site_id is not null;
+---==================新增独立站订单数据匹配===============================
+
+---==================Woo站订单数据匹配===============================
+@orderlist6:=
+select
+    distinct
+    eoo.id as erp_order_id
+   ,to_char(a.id) as site_order_id
+   ,soi.site_id
+   ,lower(nvl(site.site_name,'other')) as site_name
+   ,eoo.site_id as erp_site_id
+   ,ess.short_name as erp_site_name
+   ,eoo.add_time as erp_order_date
+   ,'woocommerce' as site_type
+from ods_looklook_mongodb_woocommerce_order a
+left join dwd_loolook_woocommerce_to_ops_mapping soi
+on lower(a.site_name)=lower(soi.shop_name)  and soi.pt=max_pt('dwd_loolook_woocommerce_to_ops_mapping')
+left join ods_looklook_looklook_tb_site site
+on (soi.site_id = site.id and site.pt = '${date}')
+inner join ods_erp_erp_order_order eoo
+on a.order_key=eoo.site_order_id_nav and eoo.pt='${date}'
+inner join ods_erp_erp_sys_site ess
+on eoo.site_id=ess.site_id and ess.pt=max_pt('ods_erp_erp_sys_site')
+where a.pt='${date}'
+and soi.site_id is not null;
+---==================Woo站订单数据匹配===============================
+
+
+
+
+---TODO
+---match order_id by order_sn and site_id
+
+--insert overwrite table dwd_mapping_erp_order_id partition (pt='${date}')
+@erp_shop_mapping:=
+select
+  tb.erp_order_id,
+  tb.site_order_id,
+  tb.site_id,
+  tb.site_name,
+  tb.erp_site_id,
+  tb.erp_site_name,
+  tb.erp_order_date,
+  tb.site_type
+from
+(
+      select
+        t.erp_order_id,
+        t.site_order_id,
+        t.site_id,
+        t.site_name,
+        t.erp_site_id,
+        t.erp_site_name,
+        t.erp_order_date,
+        t.site_type,
+        row_number() over (partition by  t.site_id,t.site_order_id order by t.erp_order_date desc)  as rn
+    from
+    (
+        SELECT
+           *
+        from @orderlist1
+        union
+        SELECT
+           *
+        from @orderlist2
+        union all
+        SELECT
+           *
+        from @orderlist3
+        union all
+        SELECT
+           *
+        from @orderlist4
+        union all
+        select *
+        from @shoplazza_order
+        union all
+        select *
+        from @orderlist5
+        union all
+        select *
+        from @orderlist6
+        union all
+        select
+        *
+        from @orderlist1_1
+    ) t
+) tb
+where tb.rn = 1
+;
+
+--OMS 系统与售卖系统订单对应关系
+@oms_order_info:=
+select
+   oo.site_id
+  ,oo.site_order_id
+  ,oo.site_order_no
+  ,oo.order_no
+  ,oo.id as order_id
+  ,oo.order_time
+  ,oo.add_time
+  ,ds.ops_site_id
+  ,ds.site_type
+  ,ds.site_name
+  ,oo.pay_time
+  ,oo.create_date
+from opdc.ods_oms_order_order oo
+left join opdc.dim_site ds
+on (oo.site_id = ds.site_id)
+;
+
+
+@oms_shop_mapping:=
+select
+   tb.erp_order_id
+  ,tb.site_order_id
+  ,tb.site_id
+  ,tb.site_name
+  ,tb.erp_site_id
+  ,tb.erp_site_name
+  ,tb.erp_order_date
+  ,tb.site_type
+from
+(
+    select
+       t.erp_order_id
+      ,t.site_order_id
+      ,t.site_id
+      ,t.site_name
+      ,t.erp_site_id
+      ,t.erp_site_name
+      ,t.erp_order_date
+      ,t.site_type
+      ,row_number() over (partition by  t.site_id,t.site_order_id order by t.erp_order_date desc)  as rn
+    from
+    (
+        -- 云站
+        select
+          distinct
+           ooi.order_id as erp_order_id
+          ,to_char(coi.id) as site_order_id
+          ,coi.site_id
+          ,coi.site_name
+          ,ooi.site_id as erp_site_id
+          ,ooi.site_name as erp_site_name
+          ,ooi.add_time as erp_order_date
+          ,coi.order_date
+          ,'cloud' as site_type
+        from dwd_looklook_cloud_order_info coi
+        inner join @oms_order_info ooi
+        on (coi.order_no = ooi.site_order_no and ooi.site_type = 'chimpone')
+        where coi.pt = '${date}'
+        -- shopify
+        union all
+        select
+           distinct
+           ooi.order_id as erp_order_id
+          ,soi.id as site_order_id
+          ,soi.site_id
+          ,soi.site_name
+          ,ooi.site_id as erp_site_id
+          ,ooi.site_name as erp_site_name
+          ,ooi.add_time as erp_order_date
+          ,soi.order_date
+          ,'shopify' as site_type
+        from dwd_looklook_shopify_order_info soi
+        inner join @oms_order_info ooi
+        on (soi.id = ooi.site_order_id and ooi.site_type = 'shopify')
+        where soi.pt='${date}'
+        --shoplazza
+        union all
+        select
+           distinct
+           ooi.order_id as erp_order_id
+          ,soi.id as site_order_id
+          ,soi.site_id
+          ,soi.site_name
+          ,ooi.site_id as erp_site_id
+          ,ooi.site_name as erp_site_name
+          ,ooi.add_time as erp_order_date
+          ,soi.order_date
+          ,'shoplazza' as site_type
+        from dwd_looklook_shoplazza_order_info soi
+        inner join @oms_order_info ooi
+        on (soi.id = ooi.site_order_id and ooi.site_type = '店匠')
+        where soi.pt='${date}'
+        --spsite
+        union all
+        select
+           distinct
+           ooi.order_id as erp_order_id
+          ,soi.order_sn as site_order_id
+          ,soi.site_id
+          ,soi.site_name
+          ,ooi.site_id as erp_site_id
+          ,ooi.site_name as erp_site_name
+          ,ooi.add_time as erp_order_date
+          ,soi.order_date
+          ,'spsite' as site_type
+        from (
+            select
+               t.order_sn,
+               t.site_id,t.site_name,t.erp_site_id,t.order_date,
+               row_number() over (partition by t.site_id,t.order_id order by t.payment_date desc) as rn
+            from
+            (
+            select soi.order_sn,soi.erp_site_id,soi.payment_date,soi.order_id,
+            soi.site_name,
+            soi.site_id,
+            soi.order_date
+            from dwd_looklook_spsite_order_info soi
+            where soi.pt='${date}'and soi.site_id is not null
+            ) t
+        )soi
+        inner join @oms_order_info ooi
+        on (soi.order_sn = ooi.site_order_id and ooi.site_type = '独立站')
+    ) t
+) tb
+where tb.rn = 1
+;
+
+
+insert overwrite table dwd_mapping_erp_order_id partition (pt='${date}')
+select
+   nvl(k.order_id,osm.erp_order_id) as erp_order_id  --优先取erp的订单ID 取不到再取oms的订单id
+  ,osm.site_order_id
+  ,osm.site_id
+  ,osm.site_name
+  ,osm.erp_site_id
+  ,osm.erp_site_name
+  ,osm.erp_order_date
+  ,osm.site_type
+  ,'oms' as data_source
+from @oms_shop_mapping osm
+left join
+(
+  select oms_order_id,order_id,row_number() over (partition by oms_order_id order by k.addtime desc) as rn
+  from  opdc.dwd_erp_order_sales_process k
+  where (oms_order_id != 0 or oms_order_id is  not  null)
+) k
+on osm.erp_order_id = k.oms_order_id and k.rn = 1
+where to_char(osm.erp_order_date,'yyyymmdd')>='20211101'
+union all
+select
+   string(esm.erp_order_id) as erp_order_id
+  ,esm.site_order_id
+  ,esm.site_id
+  ,esm.site_name
+  ,esm.erp_site_id
+  ,esm.erp_site_name
+  ,esm.erp_order_date
+  ,esm.site_type
+  ,'erp' as data_source
+from @erp_shop_mapping esm
+where to_char(esm.erp_order_date,'yyyymmdd')<'20211101'
+;

@@ -1,0 +1,355 @@
+--name:取消商品
+--author:order
+--create time:2021-11-02 14:37
+-- share_selling_price_usd_sum + share_shipping_price_usd_sum 收入字段
+-- change_type 研究
+-- 取消
+--原单商品取消
+--替换上的商品取消
+--补发添加的商品取消
+--被替换商品的取消
+--原单商品取消金额+替换上的商品取消金额+补发添加的商品取消 -被替换商品的取消金额  还要考虑手动添加商品取消这个变量  因为我算收入的时候没有加手动添加的商品  因此不需要补发添加的商品取消 吧
+-- 目前OMS取消只有  原单商品取消
+-- erp:如果是换货  会伴随着原商品取消  被替换商品取消 两个动作   这种属于换货取消 取消收入中要剔除这种。
+-- 先用原单商品取消金额+替换上的商品取消金额 -被替换商品的取消金额 算完后 然后跟下单时的商品  去均摊订单金额 得到实际的商品取消金额   剔除掉手动添加的商品
+
+-- 下单  --待会跟取消的 进行合并 均摊
+@order_goods_sale_info:=
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.sku_id
+  ,osp.spu_id
+  ,osp.spu_no
+  ,sum(osp.good_price_currency*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as good_price_currency -- 订单物品总金额
+  ,sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,'下单' as operate_type
+  ,to_char(osp.addtime,'yyyymmdd') as order_date
+from
+(
+  select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime
+  from opdc.dwd_order_sales_process osp
+  where osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) -- 剔除网红手工订单
+  union all
+  select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime
+  from popopiedc.dwd_order_sales_process osp
+  where osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1) -- 剔除网红订单
+) osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+  union all
+  select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where to_char(osp.addtime,'yyyymmdd')>='20211101' and osp.change_type = '下单' and to_char(osp.paytime,'yyyymmdd') <'20211118'
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.currency_name
+  ,osp.sku_id
+  ,osp.spu_id
+  ,osp.spu_no
+  ,to_char(osp.addtime,'yyyymmdd')
+union all
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.sku_id
+  ,osp.spu_id
+  ,osp.spu_no
+  ,sum(osp.good_price_currency*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as good_price_currency -- 订单物品总金额
+  ,sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,'下单' as operate_type
+  ,to_char(osp.paytime,'yyyymmdd') as order_date
+from
+(
+  select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime
+  from opdc.dwd_order_sales_process osp
+  where osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) -- 剔除网红手工订单
+  union all
+  select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime
+  from popopiedc.dwd_order_sales_process osp
+  where osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1) -- 剔除网红订单
+) osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+  union all
+  select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where to_char(osp.addtime,'yyyymmdd')>='20211101' and osp.change_type = '下单' and to_char(osp.paytime,'yyyymmdd') >='20211118'
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.currency_name
+  ,osp.sku_id
+  ,osp.spu_id
+  ,osp.spu_no
+  ,to_char(osp.paytime,'yyyymmdd')
+;
+
+-- 取消
+@order_goods_cancel_info:=
+select
+   t.site_id
+  ,t.order_no
+  ,t.order_id
+  ,t.order_amt
+  ,t.sku_id
+  ,t.spu_id
+  ,t.spu_no
+  ,sum(t.good_price_currency*abs(t.current_sku_qty)) as good_price_currency -- 订单物品总金额
+  ,sum(t.current_sku_qty) as current_sku_qty -- 订单物品总数量
+  ,t.currency_name
+  ,'取消' as operate_type
+  ,t.order_date
+from
+(
+      select
+       ooa.site_id
+      ,osp.order_no
+      ,osp.order_id
+      ,osp.order_amt
+      ,osp.sku_id
+      ,osp.spu_id
+      ,osp.spu_no
+      ,case when change_details_type = '被替换商品的取消' then -abs(osp.good_price_currency) else abs(osp.good_price_currency) end as good_price_currency
+      ,case when change_details_type = '被替换商品的取消' then -abs(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) else abs(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) end as current_sku_qty
+      ,osp.currency_name
+      ,to_char(osp.addtime,'yyyymmdd') as order_date
+    from (
+        select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,
+               osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+               osp.addtime,osp.change_type,osp.paytime,osp.change_details_type
+        from opdc.dwd_order_sales_process osp
+        where osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) -- 剔除网红手工订单
+        union all
+        select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,
+               osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+               osp.addtime,osp.change_type,osp.paytime,osp.change_details_type
+        from popopiedc.dwd_order_sales_process osp
+        where osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1) -- 剔除网红订单
+    ) osp
+    inner join (
+      select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+      union all
+      select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+    ) ooa
+    on (osp.order_id = ooa.order_id)
+    where to_char(osp.addtime,'yyyymmdd')>='20211101' and osp.change_type = '取消' and to_char(osp.paytime,'yyyymmdd') < '20211118'
+)t
+group by
+   t.site_id
+  ,t.order_no
+  ,t.order_id
+  ,t.order_amt
+  ,t.currency_name
+  ,t.sku_id
+  ,t.spu_id
+  ,t.spu_no
+  ,t.order_date
+union all
+select
+   t.site_id
+  ,t.order_no
+  ,t.order_id
+  ,t.order_amt
+  ,t.sku_id
+  ,t.spu_id
+  ,t.spu_no
+  ,sum(t.good_price_currency*abs(t.current_sku_qty)) as good_price_currency -- 订单物品总金额
+  ,sum(t.current_sku_qty) as current_sku_qty -- 订单物品总数量
+  ,t.currency_name
+  ,'取消' as operate_type
+  ,t.order_date
+from
+(
+      select
+       ooa.site_id
+      ,osp.order_no
+      ,osp.order_id
+      ,osp.order_amt
+      ,osp.sku_id
+      ,osp.spu_id
+      ,osp.spu_no
+      ,case when change_details_type = '被替换商品的取消' then -abs(osp.good_price_currency) else abs(osp.good_price_currency) end as good_price_currency
+      ,case when change_details_type = '被替换商品的取消' then -abs(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) else abs(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) end as current_sku_qty
+      ,osp.currency_name
+      ,to_char(osp.paytime,'yyyymmdd') as order_date
+    from (
+        select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,
+               osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+               osp.addtime,osp.change_type,osp.paytime,osp.change_details_type
+        from opdc.dwd_order_sales_process osp
+        where osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) -- 剔除网红手工订单
+        union all
+        select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,
+               osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+               osp.addtime,osp.change_type,osp.paytime,osp.change_details_type
+        from popopiedc.dwd_order_sales_process osp
+        where osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1) -- 剔除网红订单
+    ) osp
+    inner join (
+      select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+      union all
+      select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+    ) ooa
+    on (osp.order_id = ooa.order_id)
+    where to_char(osp.addtime,'yyyymmdd')>='20211101' and osp.change_type = '取消' and to_char(osp.paytime,'yyyymmdd') >='20211118'
+)t
+group by
+   t.site_id
+  ,t.order_no
+  ,t.order_id
+  ,t.order_amt
+  ,t.currency_name
+  ,t.sku_id
+  ,t.spu_id
+  ,t.spu_no
+  ,t.order_date
+;
+@weight_price:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.spu_id
+    ,t.spu_no
+    ,t.good_price_currency -- 订单物品总金额
+    ,t.current_sku_qty -- 订单物品总数量
+    ,t.currency_name
+    ,t.operate_type
+    ,t.order_date
+    ,sum(if(t.operate_type = '取消',0,t.current_sku_qty)) over (partition by t.order_id ) as sum_counts
+    ,sum(if(t.operate_type = '取消',0,t.good_price_currency)) over (partition by t.order_id ) as sum_amount
+from
+(
+  select
+     gsi.site_id
+    ,gsi.order_no
+    ,gsi.order_id
+    ,gsi.order_amt
+    ,gsi.sku_id
+    ,gsi.spu_id
+    ,gsi.spu_no
+    ,gsi.good_price_currency -- 订单物品总金额
+    ,gsi.current_sku_qty -- 订单物品总数量
+    ,gsi.currency_name
+    ,gsi.operate_type
+    ,gsi.order_date
+  from @order_goods_sale_info gsi
+  union all
+  select
+     gci.site_id
+    ,gci.order_no
+    ,gci.order_id
+    ,gci.order_amt
+    ,gci.sku_id
+    ,gci.spu_id
+    ,gci.spu_no
+    ,gci.good_price_currency -- 订单物品总金额
+    ,gci.current_sku_qty -- 订单物品总数量
+    ,gci.currency_name
+    ,gci.operate_type
+    ,gci.order_date
+  from @order_goods_cancel_info gci
+  where gci.good_price_currency !=0
+) t
+;
+
+
+@price_rate:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.spu_id
+    ,t.spu_no
+    ,t.good_price_currency -- 订单物品总金额
+    ,t.current_sku_qty -- 订单物品总数量
+    ,t.currency_name
+    ,t.operate_type
+    ,t.sum_counts
+    ,t.sum_amount
+    ,case when t.sum_amount<> 0 then t.good_price_currency/t.sum_amount
+          when t.sum_counts= 0 then 0
+          else current_sku_qty/sum_counts
+     end as price_rate
+    ,t.order_date
+from @weight_price t
+;
+
+
+-- 订单中每个商品的预估价格
+@goods_pre_price:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.spu_id
+    ,t.spu_no
+    ,t.good_price_currency -- 订单物品总金额
+    ,t.current_sku_qty -- 订单物品总数量
+    ,t.currency_name
+    ,t.operate_type
+    ,t.sum_counts
+    ,t.sum_amount
+    ,t.price_rate
+    ,t.order_amt*t.price_rate as pre_price
+    ,t.order_date
+from @price_rate t
+;
+@mapping_erp_site_info:=
+select  a.site_name,
+        a.site_id,
+        case when b.site_type_id = 4 then a.cod_erp_site_id else a.erp_site_id end as erp_site_id
+from dwd_mapping_erp_site_id a
+join ods_looklook_looklook_tb_site b
+on (a.site_id = b.id and b.pt='${date}')
+where a.pt='${date}'
+;
+
+insert overwrite table  app_looklook_site_order_deminsion_cancel_gmv partition(pt = '${date}')
+select
+  gpp.order_date
+ ,bigint(gpp.site_id) as erp_site_id
+ ,bigint(nvl(esi.site_id,0)) as site_id
+ ,nvl(esi.site_name,'other') as site_name
+ ,sum(gpp.pre_price*cct.currency_transform) as cancel_order_gmv_usd
+ ,sum(gpp.pre_price*cct.currency_transform_cny) as cancel_order_gmv_cny
+from @goods_pre_price gpp
+left join dwd_com_currency_transform cct
+on (gpp.order_date = cct.data_dt and gpp.currency_name = cct.currency_code and cct.pt = '${date}')
+inner join @mapping_erp_site_info esi
+on (gpp.site_id = esi.erp_site_id)
+where gpp.operate_type = '取消'
+group by
+   gpp.order_date
+  ,gpp.site_id
+  ,nvl(esi.site_id,0)
+  ,nvl(esi.site_name,'other')
+;

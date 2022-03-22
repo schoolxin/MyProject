@@ -1,0 +1,161 @@
+--name:站点复购率
+--author:OrderPlus
+--create time:2021-06-15 13:53
+
+-- erp跟ops的映射关系
+@mapping_erp_site_info:=
+select  a.site_name,
+        a.site_id,
+        case when b.site_type_id = 4 then a.cod_erp_site_id else a.erp_site_id end as erp_site_id
+from dwd_mapping_erp_site_id a
+join ods_looklook_looklook_tb_site b
+on (a.site_id = b.id and b.pt='${date}')
+where a.pt='${date}'
+;
+@erp_order_info:=
+select
+    a.site_id,
+    a.email,
+    to_char(a.pay_time,'yyyymmdd') as pay_date
+from ods_erp_erp_order_order a
+where a.pt = '${date}' and regexp_instr(a.email,'@') >0 and to_char(a.pay_time,'yyyymmdd')<='${date}' and to_char(a.pay_time,'yyyymmdd')<'20211101'
+group by a.site_id, a.email,to_char(a.pay_time,'yyyymmdd')
+union all
+select
+    bigint(a.site_id) as site_id,
+    a.email,
+    to_char(a.order_time,'yyyymmdd') as pay_date
+from opdc.dwd_order_order_appendix a
+where 1=1 and regexp_instr(a.email,'@') >0 and to_char(a.order_time,'yyyymmdd')<='${date}' and to_char(a.order_time,'yyyymmdd')>='20211101'
+group by a.site_id,a.email,to_char(a.order_time,'yyyymmdd')
+union all
+select
+    bigint(a.site_id) as site_id,
+    a.email,
+    to_char(a.order_time,'yyyymmdd') as pay_date
+from popopiedc.dwd_order_order_appendix a
+where 1=1 and regexp_instr(a.email,'@') >0 and to_char(a.order_time,'yyyymmdd')<='${date}' and to_char(a.order_time,'yyyymmdd')>='20211101'
+group by a.site_id,a.email,to_char(a.order_time,'yyyymmdd')
+;
+
+
+
+--用户首单的日期
+@user_first_day:=
+select
+  a.email,a.site_id,min(a.pay_date) as first_pay_date
+from @erp_order_info a
+group by a.email,a.site_id;
+
+--select
+--*
+--from @erp_order_info a
+--inner join @user_first_day b on (a.site_id = b.site_id and a.email = b.email and substring(b.first_pay_date,1,6)='202105' and b.site_id = 31136)
+--where a.pay_date>='20210601'
+--;
+--select * from @user_first_day a where substring(a.first_pay_date,1,6)='202105' and a.site_id = 31136;
+
+
+
+
+-- 每个月每个站点新增用户
+@new_user_count:=
+select
+ a.site_id,
+ substring(a.first_pay_date,1,6) as date_month,
+ count(1) as new_user_count
+from @user_first_day a
+group by a.site_id,substring(a.first_pay_date,1,6);
+
+
+--select * from @new_user_count a where date_month='202105' and a.site_id = 7;
+
+
+--当月复购复购用户
+@buyleastone_user:=
+select
+ a.site_id,
+ b.pay_date,
+ b.email,
+ substring(b.pay_date,1,6) as date_month
+from @user_first_day a
+inner join @erp_order_info b
+on (a.site_id = b.site_id and a.email = b.email and to_char(dateadd(to_date(a.first_pay_date,'yyyymmdd'),1,'mm'),'yyyymm')=substring(b.pay_date,1,6))
+--where b.pay_date = '20210614'
+;
+@buyleastone_user_count:=
+select
+ a.pay_date,
+ a.site_id,
+ count(distinct b.email) as buyleastone_user_count
+from @buyleastone_user a
+inner join @buyleastone_user b
+on (a.site_id = b.site_id and a.pay_date>=b.pay_date and a.date_month = b.date_month)
+group by
+ a.pay_date,
+ a.site_id
+;
+--select *
+--from @buyleastone_user_count a
+--inner join @new_user_count b
+--on (a.site_id = b.site_id and )
+--where pay_date>='20210601' and site_id = 7;
+--select * from @buyleastone_user_count a where a.site_id = '31136';
+
+--每个站点每一天
+@site_info:=
+select
+/* + mapjoin(dcc) */
+  a.site_id,
+  a.erp_site_id,
+  a.site_name,
+  dcc.data_dt
+from
+(
+     select to_char(dccn.date_id) as data_dt from dim_com_calender dccn where to_char(dccn.date_id)<='${date}'
+     and to_char(dccn.date_id)>='20210601'
+) dcc
+,
+(select * from @mapping_erp_site_info) a
+;
+
+@buyleastone_user_count_f:=
+select
+  t.data_dt,
+  t.site_id,
+  t.erp_site_id,
+  t.site_name,
+  t.buyleastone_user_count
+from
+(
+  select
+   a.data_dt,
+   bigint(a.site_id) as site_id,
+   a.erp_site_id,
+   a.site_name,
+   nvl(c.buyleastone_user_count,0) as buyleastone_user_count,
+   row_number() over(distribute by a.data_dt,a.erp_site_id sort by c.pay_date desc) as rn
+from @site_info a
+left join @buyleastone_user_count c
+on (a.erp_site_id = c.site_id and a.data_dt>=c.pay_date)
+) t
+where t.rn =1
+
+;
+
+
+
+insert overwrite table app_looklook_daily_site_user_repurchase partition(dt='${date}')
+select
+ a.data_dt,
+ bigint(a.site_id) as site_id,
+ a.erp_site_id,
+ a.site_name,
+ nvl(b.new_user_count,0) as new_user_count,
+ nvl(c.buyleastone_user_count,0) as buyleastone_user_count
+from @site_info a
+left join @new_user_count b
+on (b.site_id = a.erp_site_id and b.date_month = to_char(dateadd(to_date(a.data_dt,'yyyymmdd'),-1,'mm'),'yyyymm'))
+left join @buyleastone_user_count_f c
+on (c.erp_site_id = a.erp_site_id and c.data_dt = a.data_dt)
+;

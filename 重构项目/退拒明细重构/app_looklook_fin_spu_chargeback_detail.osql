@@ -1,0 +1,2646 @@
+--name:新均摊逻辑
+--author:order
+--create time:2022-01-26 15:26
+--name:app_looklook_fin_spu_chargeback_detail
+--author:order
+--create time:2022-01-26 09:38
+@site_org_info:=
+select
+*
+from
+(
+    select
+        substring(a.pt,1,6) as date_month,
+        a.site_id,
+        a.site_type_id,
+        a.site_name,
+        a.business_unit_name,
+        a.pt,
+        row_number() over (partition by substring(a.pt,1,6),a.site_id order by a.pt desc) as rn
+  from dwd_com_site_org_info a
+  where a.pt<=max_pt('dwd_com_site_org_info') and a.pt >='20200101'
+) t
+where t.rn=1
+;
+@sku_info:=
+select
+  sk1.sku_id
+ ,sk1.product_no
+ ,sk1.source_url
+from
+(
+    select
+      sk.*
+     ,row_number() over (partition by sk.sku_id order by sk.level asc) as rn
+    from
+    (
+      select
+        dk.pms_sku_id as  sku_id
+       ,dk.product_no
+       ,du.source_url
+       ,if(nvl(du.system,'other')='LMS',0,1) as level
+      from opdc.dim_sku dk
+      inner join opdc.dim_spu du
+      on (dk.product_no = du.product_no)
+      union all
+      select
+        dk.pms_sku_id as  sku_id
+       ,dk.product_no
+       ,du.source_url
+       ,if(nvl(du.system,'other')='LMS',0,1) as level
+      from popopiedc.dim_sku dk
+      inner join popopiedc.dim_spu du
+      on (dk.product_no = du.product_no)
+    ) sk
+) sk1
+where sk1.rn = 1
+;
+--sku 发货情况
+@site_delivery_info_oms:=
+select
+   lps.order_id
+  ,lps.skuid as skuid
+  ,sum(lps.goodscount) as sku_count
+from opdc.dw_logistics_package_shipments lps --opdc 网红订单在erp中创建的  该表中新数据没有网红订单 所以无需过滤
+where to_char(lps.deliverytime,'yyyymmdd')>='20200101'
+--and  lps.order_id in (16842323,16842473,16843125,16843911,16847285,16851927)
+and lps.deliverystatus != '清关退回'
+group by
+   lps.order_id
+  ,lps.skuid
+union all
+select
+   lps.order_id
+  ,lps.skuid as skuid
+  ,sum(lps.goodscount) as sku_count
+from popopiedc.dw_logistics_package_shipments lps
+where to_char(lps.deliverytime,'yyyymmdd')>='20200101'
+--and  lps.order_id in (16842323,16842473,16843125,16843911,16847285,16851927)
+and lps.deliverystatus != '清关退回'
+--wuting add 排除掉网红订单
+and lps.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+group by
+   lps.order_id
+  ,lps.skuid
+;
+-- 均摊
+@order_goods_sale_info_purchase:=
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+  ,sum(abs(osp.good_price_currency)*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as good_price_currency
+  ,sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,osp.addtime as order_date
+  ,nvl(osp.erp_order_id,osp.order_id)as erp_order_id
+  ,to_date(osp.paytime) as pay_date
+from (
+  select osp.order_no,osp.order_id,osp.order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from opdc.dwd_order_sales_process osp
+  union all
+  select osp.order_no,osp.order_id,osp.order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from popopiedc.dwd_order_sales_process osp
+  where osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+) osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+  union all
+  select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where 1=1 and (osp.change_type in ('下单') or (osp.change_details_type = '替换上' and osp.change_type = '换货') or (osp.change_details_type = '添加补发商品' and osp.change_type = '补发'))
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.currency_name
+  ,nvl(osp.sku_erp_id,osp.sku_id)
+  ,osp.addtime
+  ,osp.erp_order_id
+  ,to_date(osp.paytime)
+;
+@order_goods_sale_info_cancel:=
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+  ,abs(sum(osp.good_price_currency*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty))) as good_price_currency
+  ,abs(sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty))) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,osp.addtime as order_date
+  ,nvl(osp.erp_order_id,osp.order_id) as erp_order_id
+  ,to_date(osp.paytime) as pay_date
+from (
+  select osp.order_no,osp.order_id,osp.order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from opdc.dwd_order_sales_process osp
+  union all
+  select osp.order_no,osp.order_id,osp.order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from popopiedc.dwd_order_sales_process osp
+  where osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+) osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+  union all
+  select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where 1=1 and (change_details_type = '原单商品取消' and change_type = '取消')
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.currency_name
+  ,nvl(osp.sku_erp_id,osp.sku_id)
+  ,osp.addtime
+  ,osp.erp_order_id
+  ,to_date(osp.paytime)
+;
+
+
+-- 剔除取消的商品 如果剔除后的数量为负数则置为0
+
+@order_goods_sale_info:=
+select
+   sip.site_id
+  ,sip.order_no
+  ,sip.order_id
+  ,sip.order_amt
+  ,sip.sku_id
+  ,sip.good_price_currency
+  ,sip.current_sku_qty
+  ,sip.currency_name
+  ,sip.order_date
+  ,sip.erp_order_id
+  ,sip.pay_date
+  ,nvl(sic.good_price_currency,0) as good_price_currency_cancel
+  ,nvl(sic.current_sku_qty,0) as current_sku_qty_cancel
+  ,if(sip.good_price_currency-nvl(sic.good_price_currency,0)<0,0,sip.good_price_currency-nvl(sic.good_price_currency,0)) as good_price_currency_final
+  ,if(sip.current_sku_qty-nvl(sic.current_sku_qty,0)<0,0,sip.current_sku_qty-nvl(sic.current_sku_qty,0)) as current_sku_qty_final
+from @order_goods_sale_info_purchase sip
+left join @order_goods_sale_info_cancel sic
+on (sip.order_id = sic.order_id and sip.site_id = sip.site_id and sip.sku_id = sic.sku_id)
+where to_char(sip.pay_date,'yyyymmdd') >= '20190101'
+;
+@weight_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.good_price_currency_final -- 订单物品总金额
+    ,t.current_sku_qty_final -- 订单物品总数量
+    ,t.current_sku_qty
+    ,t.currency_name
+    ,t.order_date
+    ,t.pay_date
+    ,t.erp_order_id
+    ,sum(t.current_sku_qty_final) over (partition by t.order_id ) as sum_counts
+    ,sum(t.good_price_currency_final) over (partition by t.order_id ) as sum_amount
+    ,sum(t.current_sku_qty) over (partition by t.order_id ) as sum_counts_
+from
+(
+  select
+     gsi.site_id
+    ,gsi.order_no
+    ,gsi.order_id
+    ,gsi.order_amt
+    ,gsi.sku_id
+    ,gsi.good_price_currency -- 订单物品总金额
+    ,gsi.current_sku_qty -- 订单物品总数量
+    ,gsi.currency_name
+    ,gsi.order_date
+    ,gsi.erp_order_id
+    ,gsi.pay_date
+    ,gsi.good_price_currency_final
+    ,gsi.current_sku_qty_final
+  from @order_goods_sale_info gsi
+) t
+;
+
+@price_rate_oms:=
+select
+     wp.site_id
+    ,wp.order_no
+    ,wp.order_id
+    ,wp.order_amt
+    ,wp.sku_id
+    ,wp.good_price_currency_final -- 订单物品总金额
+    ,wp.current_sku_qty_final -- 订单物品总数量
+    ,wp.currency_name
+    ,wp.sum_counts
+    ,wp.sum_amount
+    ,case when wp.sum_amount<> 0 then wp.good_price_currency_final/wp.sum_amount
+          when wp.sum_counts= 0 then current_sku_qty/sum_counts_ -- 整单被取消了  sum_counts就是0了 这样的话均摊的退款或拒付就有问题了所以加了一个未被取消商品的数量平均
+          else current_sku_qty_final/sum_counts
+     end as price_rate
+    ,wp.order_date
+    ,wp.pay_date
+    ,wp.erp_order_id
+from @weight_price_oms wp
+;
+
+
+@goods_pre_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.good_price_currency_final -- 订单物品总金额
+    ,t.current_sku_qty_final -- 订单物品总数量
+    ,t.currency_name
+    ,t.sum_counts
+    ,t.sum_amount
+    ,t.price_rate
+    ,t.order_amt*t.price_rate as pre_price
+    ,t.order_date
+    ,t.erp_order_id
+    ,si.product_no
+    ,si.source_url
+    ,if(io.sku_count is null,0,1) as is_delivery
+from @price_rate_oms t
+left join @sku_info si
+on (t.sku_id = si.sku_id)
+left join @site_delivery_info_oms io
+on (t.sku_id= io.skuid and nvl(t.order_id,t.erp_order_id) = io.order_id)
+--where t.price_rate!=0
+;
+
+@erp_order_address:=
+select a.order_id,concat(a.country,"-",a.province,"-",a.city,"-",a.address) as address
+from
+(
+    select t.order_id,t.country,t.province,t.city,t.address,row_number() over (partition by t.order_id order by t.modified_date desc) as rn from opdc.dw_order_address t
+    union all
+    select t.order_id,t.country,t.province,t.city,t.address,row_number() over (partition by t.order_id order by t.modified_date desc) as rn from popopiedc.dw_order_address t
+) a
+where rn =1 ;
+
+--erp 取消退款原因
+@order_problem_erp:=
+select
+    a.order_id,a.parent_reason,a.problem_reason,a.order_goods_id
+from
+(
+  select  a.order_id,b.order_goods_id,orr2.name as problem_reason,orr1.name as parent_reason,
+          row_number() over (partition by a.order_id,b.order_goods_id order by a.create_time desc)  rn
+  from ods_erp_erp_order_refund a
+  left join ods_erp_erp_order_refund_detail b
+  on (a.id = b.order_refund_id and b.pt = '${date}')
+  left join ods_erp_erp_order_refund_detail_reason c
+  on (b.id = c.order_refund_detail_id and c.pt = '${date}')
+  left join ods_erp_erp_order_refund_reason orr1
+  on c.reason_parent_id=orr1.id and orr1.pt=max_pt('ods_erp_erp_order_refund_reason')
+  left join ods_erp_erp_order_refund_reason orr2
+  on c.reason_child_id=orr2.id and orr2.pt=max_pt('ods_erp_erp_order_refund_reason')
+  where a.pt = '${date}'
+) a
+where a.rn =1
+;
+@order_cancel_reason_erp:=
+select
+   oog.order_id
+  ,oog.sku_id
+  ,oogr.cancel_reason
+  ,oog.id as order_goods_id
+from ods_erp_erp_order_order_goods oog
+left join (
+    select
+      ooc.orderid,ooc.ordergoodsid,concat_ws(",",collect_set(oc.reasondesc)) as cancel_reason
+    from ods_erp_order_ordergoods_cancelreasonrecord ooc
+    left join (select a.reasonid,concat_ws(",",collect_set(a.reasondesc)) as reasondesc from ods_erp_order_cancelreason a where a.pt = '${date}' group by a.reasonid) oc
+    on (ooc.cancelreasonid = oc.reasonid)
+    where ooc.pt = '${date}'
+    group by ooc.orderid,ooc.ordergoodsid
+) oogr
+on (oog.order_id = oogr.orderid and oog.id = oogr.ordergoodsid)
+where oog.pt = '${date}'
+;
+@order_cancel_refund_reason_erp:=
+select
+  cre.order_id
+ ,cre.sku_id
+ ,concat_ws(",",collect_set(cre.cancel_reason)) as cancel_reason
+ ,concat_ws(",",collect_set(pe.parent_reason)) as parent_reason
+ ,concat_ws(",",collect_set(pe.problem_reason)) as problem_reason
+ ,'erp' as source
+from @order_cancel_reason_erp cre
+left join @order_problem_erp pe
+on (cre.order_goods_id = pe.order_goods_id and cre.order_id = pe.order_id)
+group by
+  cre.order_id
+ ,cre.sku_id
+;
+
+--oms 取消退款原因
+@order_cancel_refund_reason_oms:=
+select
+  t.order_id
+ ,t.sku_id
+ ,concat_ws(",",collect_set(t.cancel_reason)) as cancel_reason
+ ,concat_ws(",",collect_set(t.parent_reason)) as parent_reason
+ ,concat_ws(",",collect_set(t.problem_reason)) as problem_reason
+ ,'oms' as source
+from
+(
+    select
+     a.order_id
+    ,nvl(d.sku_erp_id,d.sku_id) as sku_id
+    ,a.cancel_reason
+    ,c.name as problem_reason
+    ,c1.name as parent_reason
+  from opdc.ods_oms_order_refund a
+  left join opdc.ods_oms_order_refund_detail b
+  on (a.id = b.refund_id)
+  left join opdc.ods_oms_order_problem_reason c
+  on (a.problem_id = c.id)
+  left join opdc.ods_oms_order_problem_reason c1
+  on (c.parent_id = c1.id)
+  left join opdc.ods_oms_order_change_detail d
+  on (b.change_detail_id = d.id)
+) t
+group by
+  t.order_id
+ ,t.sku_id
+union all
+select
+  t.order_id
+ ,t.sku_id
+ ,concat_ws(",",collect_set(t.cancel_reason)) as cancel_reason
+ ,concat_ws(",",collect_set(t.parent_reason)) as parent_reason
+ ,concat_ws(",",collect_set(t.problem_reason)) as problem_reason
+ ,'oms' as source
+from
+(
+    select
+     a.order_id
+    ,nvl(d.sku_erp_id,d.sku_id) as sku_id
+    ,a.cancel_reason
+    ,c.name as problem_reason
+    ,c1.name as parent_reason
+  from popopiedc.ods_oms_order_refund a
+  left join popopiedc.ods_oms_order_refund_detail b
+  on (a.id = b.refund_id)
+  left join popopiedc.ods_oms_order_problem_reason c
+  on (a.problem_id = c.id)
+  left join popopiedc.ods_oms_order_problem_reason c1
+  on (c.parent_id = c1.id)
+  left join popopiedc.ods_oms_order_change_detail d
+  on (b.change_detail_id = d.id)
+) t
+group by
+  t.order_id
+ ,t.sku_id
+;
+@order_problem:=
+select
+  ro.order_id
+ ,ro.sku_id
+ ,ro.cancel_reason
+ ,ro.parent_reason
+ ,ro.problem_reason
+from @order_cancel_refund_reason_oms ro
+where ro.sku_id is not null
+union all
+select
+  re.order_id
+ ,to_char(re.sku_id) as sku_id
+ ,re.cancel_reason
+ ,re.parent_reason
+ ,re.problem_reason
+from @order_cancel_refund_reason_erp re
+where re.sku_id is not null
+;
+--select
+--  a.order_id,a.sku_id
+--from @order_problem a group by a.order_id,a.sku_id having count(1)>1;
+
+
+@mapping_erp_order:=
+select  cc.site_order_id,cc.erp_order_id,cc.site_id,cc.erp_site_id,cc.erp_order_date
+from
+(
+    select cc.site_order_id,cc.erp_order_id,cc.site_id,cc.erp_site_id,cc.erp_order_date,row_number() over (partition by  cc.site_id,cc.site_order_id order by cc.erp_order_date desc)  as rn
+from dwd_mapping_erp_order_id cc where cc.pt = '${date}'
+) cc
+where 1=1 and cc.rn = 1;
+
+@stripe_card_info:=
+select
+  sp.id
+ ,get_json_object(payment_method_details,'$.card.brand') as card_type
+from ods_looklook_mongodb_stripe_payment sp
+where sp.pt= '${date}'
+group by sp.id,sp.payment_method_details
+;
+@stripe_disputes_info:=
+select
+    sd.charge as transaction_id
+   ,if(lower(sd.status)='won',sd.amount/100,-sd.amount/100) as transation_amount
+   ,from_unixtime(sd.created) as transation_date
+   ,sd.status
+   ,upper(sd.currency) as currency_code
+   ,sd.site_name as merchant_code
+   ,'dispute' as transaction_type
+   ,sci.card_type
+   ,sd.reason
+from
+(
+  select sd.charge,sd.status,sd.amount,sd.created,sd.currency,sd.site_name,sd.reason
+  from ods_looklook_mongodb_stripe_disputes sd where sd.pt = '${date}' and sd.object = 'dispute' and lower(sd.status) = 'won'
+  union all
+  select sd.charge,sd.status,sd.amount,sd.created,sd.currency,sd.site_name,sd.reason
+  from
+  (
+    select sd.charge,sd.status,sd.amount,sd.created,sd.currency,sd.site_name,row_number() over (partition by sd.charge,sd.id order by sd.update_time) as rn,sd.reason
+    from ods_looklook_mongodb_stripe_disputes sd where sd.pt = '${date}' and sd.object = 'dispute' and lower(sd.status) != 'won'
+  ) sd
+  where sd.rn =1
+) sd
+left join @stripe_card_info sci
+on (sd.charge = sci.id)
+;
+@stripe_chargeback_infos:=
+select
+  nvl(b.site_id,0) as site_id
+ ,nvl(b.site_name,'other') as site_name
+ ,to_char(sdi.transation_date,'yyyymmdd') as data_dt
+ ,sdi.transation_amount as dispute_amount
+ ,sdi.currency_code as currency_code
+ ,0 as dispute_fees
+ ,sdi.merchant_code as merchant_code
+ ,b.if_swipe
+ ,'stripe' as payment_type
+ ,cct.currency_transform_cny
+ ,cct.currency_transform
+ ,case when sdi.transation_amount < 0 then 'chargeback' else 'chargeback_reversal' end as chargeback_type
+ ,sdi.transaction_id as trans_id
+ ,b.order_id
+ ,sdi.status as journal_type
+ ,sdi.reason as dispute_reason_type
+ ,sdi.card_type as card_type
+from @stripe_disputes_info sdi
+left join dwd_mapping_txn_order_site b
+on (sdi.transaction_id = b.txn_id and b.pt = '${date}' and b.pay_type = 'stripe')
+left join dwd_com_currency_transform cct
+on to_char(sdi.transation_date,'yyyymmdd')=cct.data_dt and sdi.currency_code=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+;
+--airwallex
+@dispute_info:=
+select
+  format_shopify_date(a.created_at) as created_at,
+  get_json_object(a.data,'$.object.payment_intent_id') as payment_intent_id,
+  get_json_object(a.data,'$.object.card_scheme') as card_scheme,
+  get_json_object(a.data,'$.object.dispute_amount') as dispute_amount,
+  get_json_object(a.data,'$.object.dispute_currency') as dispute_currency,
+  get_json_object(a.data,'$.object.dispute_reason_type') as dispute_reason,
+  format_shopify_date(get_json_object(a.data,'$.object.updated_at')) as updated_at,
+  get_json_object(a.data,'$.object.status') as dispute_status,
+  get_json_object(a.data,'$.object.stage') as dispute_stage,
+  get_json_object(a.data,'$.object.dispute_reason_type') as dispute_reason_type,
+  lower(a.name) as dispute_lifecycle,
+  a.account_id,
+  get_json_object(a.data,'$.object.dispute_id') as dispute_id,
+  get_json_object(a.data,'$.object.dispute_original_reason_code') as reason_code
+from ods_looklook_mongodb_airwallex_chargeback_webhook a
+where a.pt = '${date}';
+
+
+@airwallex_chargeback_infos:=
+select
+  nvl(b.site_id,0) as site_id
+ ,nvl(b.site_name,'other') as site_name
+ ,dis.data_dt
+ ,dis.dispute_amount
+ ,dis.dispute_currency as currency_code
+ ,dis.dispute_fees
+ ,c.site_name as merchant_code
+ ,b.if_swipe
+ ,'airwallex' as payment_type
+ ,cct.currency_transform_cny
+ ,cct.currency_transform
+ ,case when dispute_amount < 0 then 'chargeback' else 'chargeback_reversal' end as chargeback_type
+ ,dis.payment_intent_id as trans_id
+ ,b.order_id
+ ,dis.journal_type
+ ,dis.dispute_reason_type
+ ,dis.card_type
+ ,dis.reason_code
+from
+(
+    select
+       t.data_dt,
+       t.payment_intent_id,
+       t.dispute_amount,
+       t.dispute_currency,
+       t.dispute_fees,
+       t.journal_type,
+       t.dispute_reason_type,
+       t.card_type,
+       t.reason_code
+      from
+      (
+          select
+             to_char(a.created_at,'yyyymmdd') as data_dt,
+             a.payment_intent_id,
+             -a.dispute_amount as dispute_amount,
+             a.dispute_currency,
+             -15 as dispute_fees,
+             row_number() over (partition by dispute_id order by created_at) as rank_rn,
+             a.dispute_status as journal_type,
+             a.dispute_reason_type,
+             a.card_scheme as card_type,
+             a.reason_code
+          from @dispute_info a
+          where 1=1
+      ) t
+      where t.rank_rn = 1
+      union all
+      select
+         t.data_dt,
+         t.payment_intent_id,
+         cast(t.dispute_amount as decimal) as dispute_amount,
+         t.dispute_currency,
+         t.dispute_fees,
+         t.journal_type,
+         t.dispute_reason_type,
+         t.card_type,
+         t.reason_code
+      from
+      (
+          select
+             to_char(a.created_at,'yyyymmdd') as data_dt,
+             a.payment_intent_id,
+             a.dispute_amount,
+             a.dispute_currency,
+             0 as dispute_fees,
+             row_number() over (partition by dispute_id order by created_at) as rank_rn,
+             a.dispute_status as journal_type,
+             a.dispute_reason_type,
+             a.card_scheme as card_type,
+             a.reason_code
+          from @dispute_info a
+          where dispute_lifecycle  in ('dispute.dispute_reversed','dispute.won')
+      ) t
+      where t.rank_rn = 1
+) dis
+left join dwd_mapping_txn_order_site b
+on (dis.payment_intent_id = b.txn_id and b.pt = '${date}' and b.pay_type = 'airwallex')
+left join (select a.id,a.site_name from ods_looklook_mongodb_airwallex_payments a where a.pt='${date}' group by a.id,a.site_name) c
+on (dis.payment_intent_id = c.id)
+left join dwd_com_currency_transform cct
+on dis.data_dt=cct.data_dt and dis.dispute_currency=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+;
+
+--select * from @mapping_erp_order where erp_order_id='3395383';
+@checkout_trans:=
+select
+  to_char(dateadd(format_shopify_date(a.breakdown_date),-8,'hh'),'yyyymmdd') as trans_date,
+  lower(a.breakdown_type) as breakdown_type,
+  a.payment_id,
+  a.processing_currency as payment_currency,
+  a.processing_currency_amount,
+  a.channel_name as merchant_account,
+  a.action_type,
+  a.reference,
+  a.payment_method as card_type,
+  case when lower(a.breakdown_type) rlike 'chargeback' and processing_currency_amount<0 then 'chargeback'
+       when lower(a.breakdown_type) rlike 'chargeback' and processing_currency_amount>0 then 'chargeback_reversal'
+       else ''
+  end as chargeback_type
+from (select * from ods_looklook_mongodb_checkout_data_csv a where a.pt = '${date}' and lower(a.breakdown_type) not like '%fee%') a
+where lower(a.breakdown_type) rlike 'refunded' or lower(a.breakdown_type) rlike 'chargeback' or lower(a.breakdown_type) rlike 'chargeback_reversal'
+;
+-- pacypay
+@pacypay_order_info_pre:=
+  select
+     t3.order_id
+    ,t2.merchant_no as merchant_code
+    ,nvl(t3.site_id,0) as site_id
+    ,nvl(t3.site_name,'other') as  site_name
+    ,t1.decurrency as currency_code
+    ,t1.transproperty
+    ,t1.detime
+    ,t1.cardbincountry as bin_country
+    ,t1.merchantno
+    ,t1.demoney
+    ,'a' as type
+    ,t3.if_swipe
+  from ods_looklook_mongodb_pacypay_settle_info t1
+  inner join
+  (select
+        distinct
+        merchant_no,
+        currency,
+        unique_id,
+        transaction_id
+     from ods_looklook_mongodb_pacypay_transaction nt1
+     where nt1.pt = '${date}' and nt1.trade_status='SUCCESS'
+  ) t2
+  on (t1.merchantno = t2.transaction_id)
+  left join  dwd_mapping_txn_order_site t3
+  on t2.transaction_id=t3.txn_id and t3.site_type=1 and t3.pt='${date}' and t3.pay_type='pacypay'
+  where t1.pt = '${date}'
+  union all
+  select
+     t3.order_id
+    ,t2.merchant_no as merchant_code
+    ,nvl(t3.site_id,0) as site_id
+    ,nvl(t3.site_name,'other') as  site_name
+    ,t1.decurrency as currency_code
+    ,t1.transproperty
+    ,t1.detime
+    ,t1.cardbincountry as bin_country
+    ,t1.merchantno
+    ,t1.demoney
+    ,'b' as type
+    ,t3.if_swipe
+  from ods_looklook_mongodb_pacypay_settle_info t1
+  inner join
+  (
+    select distinct
+       merchant_no,
+       currency,
+       unique_id,
+       transaction_id
+  from ods_looklook_mongodb_pacypay_transaction nt1
+  where nt1.pt = '${date}' and nt1.trade_status='SUCCESS'
+  ) t2
+  on (t1.merchantno = t2.transaction_id)
+  left join dwd_mapping_txn_order_site t3
+  on t2.unique_id=t3.unique_id and t3.site_type in (2,5,3) and t3.pt='${date}' and t3.pay_type='pacypay'
+  where t1.pt = '${date}';
+
+
+@data_rank:=
+select a.*,rank() over (partition by  merchantno order by nvl(order_id,'zzzzzzzzzz') asc) as rank_code
+from @pacypay_order_info_pre a;
+
+@pacypay_order_info:=
+select
+   tb1.order_id
+  ,tb1.merchant_code
+  ,tb1.site_id
+  ,tb1.site_name
+  ,tb1.currency_code
+  ,tb1.transproperty
+  ,tb1.detime
+  ,tb1.bin_country
+  ,tb1.merchantno
+  ,tb1.demoney
+  ,tb1.if_swipe
+  ,'' as card_type
+  ,case when tb1.transproperty = '拒付' then 'chargeback' else '' end as chargeback_type
+from @data_rank tb1
+where tb1.rank_code = 1 and tb1.order_id is not null
+union all
+select
+   tb1.order_id
+  ,tb1.merchant_code
+  ,tb1.site_id
+  ,tb1.site_name
+  ,tb1.currency_code
+  ,tb1.transproperty
+  ,tb1.detime
+  ,tb1.bin_country
+  ,tb1.merchantno
+  ,tb1.demoney
+  ,tb1.if_swipe
+  ,'' as card_type
+  ,case when tb1.transproperty = '拒付' then 'chargeback' else '' end as chargeback_type
+from
+(
+    select t.*,rank() over (partition by  merchantno order by t.type) as rank_code_n
+    from @data_rank t
+    where t.rank_code = 1 and t.order_id is  null
+) tb1
+where tb1.rank_code_n = 1;
+
+
+--cardpay
+@refund_info:=
+select
+   get_json_object(a.merchant_order,'$.id') as order_on,
+   get_json_object(a.refund_data,'$.id') as refund_id,
+   get_json_object(a.refund_data,'$.amount') as refund_amount,
+   get_json_object(a.refund_data,'$.created') as refund_date,
+   get_json_object(a.refund_data,'$.currency') as currency_code,
+   get_json_object(a.refund_data,'$.decline_code') as decline_code,
+   get_json_object(a.refund_data,'$.decline_reason') as decline_reason,
+   get_json_object(a.refund_data,'$.status') as status,
+   get_json_object(a.payment_data,'$.id') as trans_id,
+   get_json_object(a.card_account,'$.card.issuing_country_code') as card_issue_country,
+   get_json_object(a.card_account,'$.card.masked_pan') as card_no,
+   case when get_json_object(a.card_account,'$.masked_pan') like '4%' then 'Visa' when get_json_object(a.card_account,'$.masked_pan') like '2%' or get_json_object(a.card_account,'$.masked_pan') like '5%' then 'MasterCard' else 'other' end card_type,
+   a.terminal_code as merchant_code
+from ods_looklook_mongodb_cardpay_refunds a
+where a.pt = '${date}';
+--cardpay 拒付数据
+@cardpay_trans_info:=
+select
+  get_json_object(a.merchant_order,'$.id') as checkout_id,
+  get_json_object(a.payment_data,'$.id') as trans_id,
+  get_json_object(a.payment_data,'$.amount') as trans_amount,
+  get_json_object(a.payment_data,'$.created') as trans_date,
+  get_json_object(a.payment_data,'$.currency') as currency_code,
+  get_json_object(a.payment_data,'$.status') as trans_status,
+  get_json_object(a.payment_data,'$.decline_reason') as decline_reason,
+  get_json_object(a.payment_data,'$.decline_code') as decline_code,
+  get_json_object(a.card_account,'$.issuing_country_code') as card_issue_country,
+  get_json_object(a.card_account,'$.masked_pan') as card_no,
+  case when get_json_object(a.card_account,'$.masked_pan') like '4%' then 'Visa' when get_json_object(a.card_account,'$.masked_pan') like '2%' or get_json_object(a.card_account,'$.masked_pan') like '5%' then 'MasterCard' else 'other' end card_type,
+  a.terminal_code as merchant_code
+from ods_looklook_mongodb_cardpay_payments a
+where a.pt = '${date}'
+;
+
+@cardpay_trans_infos:=
+select
+   a.trans_id
+  ,a.trans_amount
+  ,to_char(dateadd(format_shopify_date(a.trans_date),-8,'hh'),'yyyymmdd') as trans_date
+  ,a.currency_code
+  ,a.card_issue_country
+  ,a.card_no
+  ,a.card_type
+  ,a.merchant_code
+from @cardpay_trans_info a
+where a.trans_status = 'COMPLETED';
+
+@charged_back_info:=
+-- cardpay 目前cardpay没有将拒付成功的数据推送给商户 所以目前拿不到数据
+select
+   get_json_object(a.merchant_order,'$.id') as order_on,
+   -get_json_object(a.payment_data,'$.amount') as charged_back_amount,
+   callback_time as charged_back_date,
+   get_json_object(a.payment_data,'$.currency') as currency_code,
+   get_json_object(a.payment_data,'$.status') as status,
+   get_json_object(a.payment_data,'$.id') as trans_id,
+   get_json_object(a.card_account,'$.masked_pan') as card_no,
+   case when get_json_object(a.card_account,'$.masked_pan') like '4%' then 'Visa' when get_json_object(a.card_account,'$.masked_pan') like '2%' or get_json_object(a.card_account,'$.masked_pan') like '5%' then 'MasterCard' else 'other' end card_type,
+   case when get_json_object(a.payment_data,'$.status') = 'CHARGED_BACK' then 'chargeback' else '' end as chargeback_type
+from ods_looklook_mongodb_cardpay_webhook_data a
+where a.pt = '${date}' and get_json_object(a.payment_data,'$.status') = 'CHARGED_BACK';
+
+
+--credorax
+@credorax_payment_trans:=
+select
+  a.posting_date as transaction_date,
+  a.mid as merchant_code,
+  nvl(b.site_id,0) as site_id,
+  nvl(b.site_name,'other') as site_name,
+  a.orig_transaction_amount as transaction_amount,
+  a.orig_transaction_currency as currency_code,
+  a.transaction_type,
+  a.payment_id,
+  a.request_id,
+  b.order_id,
+  b.if_swipe,
+  a.card_scheme as card_type
+from ods_looklook_mongodb_credorax_processing_activity a
+left join dwd_mapping_txn_order_site b
+on (a.request_id = b.txn_id and b.pt = '${date}' and b.pay_type = 'credorax')
+where a.pt = '${date}' and a.transaction_type = 'Purchase'
+;
+@credorax_chargeback_info:=
+select
+  a.posting_date as transaction_date,
+  a.mid as merchant_code,
+  nvl(b.site_id,0) as site_id,
+  nvl(b.site_name,'other') as site_name,
+  a.orig_transaction_amount as transaction_amount,
+  a.orig_transaction_currency as currency_code,
+  a.transaction_type,
+  a.orig_request_id as request_id,
+  a.payment_id,
+  b.order_id,
+  a.reason_desc,
+  b.if_swipe,
+  c.card_type as card_type,
+  case when a.transaction_type in ('1st Chargeback','2nd Chargeback','1st Chargeback Allocation','Re-presentment Reversal') then 'chargeback'
+       when a.transaction_type in ('1st Chargeback Reversal','Re-presentment') then 'chargeback_reversal'
+       else ''
+  end as chargeback_type,
+  concat(c.card_type,'_',a.reason_code) as reasoncode
+from ods_looklook_mongodb_credorax_chargeback_activity a
+left join dwd_mapping_txn_order_site b
+on ((a.orig_request_id = b.txn_id) and b.pt = '${date}' and b.pay_type='credorax')
+left join (select c.payment_id,c.card_type from @credorax_payment_trans c) c
+on (a.payment_id = c.payment_id)
+where a.pt = '${date}'
+;
+
+-- 退款
+--airwallex
+-- 退款
+@airwallex_refunds:=
+select
+   substring(replace(a.created_at_bj,'-',''),1,8) as trans_date
+  ,a.site_name as merchant_code
+  ,soi.business_unit_name
+  ,nvl(b.site_id,0) as site_id
+  ,nvl(b.site_name,'other') as site_name
+  ,soi.site_type_id
+  ,a.status
+  ,a.currency as currency_code
+  ,a.amount as refunds
+  ,cct.currency_transform
+  ,a.payment_intent_id
+  ,b.order_id
+  ,'' as chargeback_code
+  ,'' as journal_type
+  ,a.reason as refund_reason
+  ,'airwallex' as payment_type
+  ,b.if_swipe
+  ,cct.currency_transform_cny
+  ,'' as card_type
+  ,'' as chargeback_type
+  ,'' as resovle_status
+from ods_looklook_mongodb_airwallex_refunds a
+left join dwd_mapping_txn_order_site b
+on (a.payment_intent_id = b.txn_id and b.pt = '${date}' and b.pay_type = 'airwallex')
+left join @site_org_info soi
+on b.site_id=soi.site_id and substring(replace(a.created_at_bj,'-',''),1,6) = soi.date_month
+left join dwd_com_currency_transform cct
+on substring(replace(a.created_at_bj,'-',''),1,8)=cct.data_dt and a.currency=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where a.pt = '${date}' and substring(replace(a.created_at_bj,'-',''),1,8)<='${date}' and a.status in ('SUCCEEDED')
+;
+
+@stripe_refund_info:=
+select
+    sr.charge as transaction_id
+   ,-sr.amount/100 as transation_amount
+   ,from_unixtime(sr.created) as transation_date
+   ,sr.status
+   ,upper(sr.currency) as currency_code
+   ,sr.site_name as merchant_code
+   ,'refund' as transaction_type
+   ,0 as payment_fees
+   ,0 as gateway_fees_hkd
+   ,sr.reason
+   ,sci.card_type
+from ods_looklook_mongodb_stripe_refunds sr
+left join @stripe_card_info sci
+on (sr.charge = sci.id)
+where sr.pt = '${date}' and sr.object = 'refund' and sr.status = 'succeeded'
+;
+
+
+
+@stripe_refunds:=
+select
+   to_char(a.transation_date,'yyyymmdd') as trans_date
+  ,a.merchant_code as merchant_code
+  ,soi.business_unit_name
+  ,nvl(b.site_id,0) as site_id
+  ,nvl(b.site_name,'other') as site_name
+  ,soi.site_type_id
+  ,a.status
+  ,a.currency_code as currency_code
+  ,a.transation_amount as refunds
+  ,cct.currency_transform
+  ,a.transaction_id as payment_intent_id
+  ,b.order_id
+  ,'' as chargeback_code
+  ,'' as journal_type
+  ,a.reason as refund_reason
+  ,'stripe' as payment_type
+  ,b.if_swipe
+  ,cct.currency_transform_cny
+  ,'' as card_type
+  ,'' as chargeback_type
+  ,'' as resovle_status
+from @stripe_refund_info a
+left join dwd_mapping_txn_order_site b
+on (a.transaction_id = b.txn_id and b.pt = '${date}' and b.pay_type = 'stripe')
+left join @site_org_info soi
+on b.site_id=soi.site_id and to_char(a.transation_date,'yyyymm') = soi.date_month
+left join dwd_com_currency_transform cct
+on to_char(a.transation_date,'yyyymmdd')=cct.data_dt and a.currency_code=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+;
+
+
+
+@credorax_refund:=
+select
+    a.posting_date as transaction_date,
+    a.mid as merchant_code,
+    nvl(b.site_id,0) as site_id,
+    nvl(b.site_name,'other') as site_name,
+    a.orig_transaction_amount as transaction_amount,
+    a.orig_transaction_currency as currency_code,
+    a.transaction_type,
+    a.request_id,
+    a.payment_id,
+    c.order_id,
+    c.if_swipe,
+    '' as card_type
+from ods_looklook_mongodb_credorax_processing_activity a
+inner join @credorax_payment_trans b
+on (a.payment_id = b.payment_id)
+left join dwd_mapping_txn_order_site c
+on ((b.request_id = c.txn_id) and c.pt = '${date}' and c.pay_type='credorax')
+where a.pt = '${date}' and lower(a.transaction_type) rlike 'refund'
+;
+
+-- 晶粒支付渠道xborder
+@xborder_refund:=
+select
+  StrDatetime_to_StrDate(a.date_pay) as trans_date,
+  a.merchant_id as merchant_code,
+  nvl(b.site_id,0) as site_id,
+  nvl(b.site_name,'other') as site_name,
+  -a.amount as transaction_amount,
+  a.currency as currency_code,
+  concat(a.transaction_type,'-',a.transaction_status) as transaction_type,
+  a.order_number as transaction_code,
+  b.order_id,
+  b.if_swipe,
+  '' as card_type
+from ods_looklook_mongodb_gltech_transactions a
+left join dwd_mapping_txn_order_site b
+on (a.order_number = b.txn_id and b.pay_type = 'xborder' and b.pt = '${date}')
+where a.pt = '${date}' and a.transaction_type = 'refund' and a.transaction_status = 'Approved';
+
+@xborder_chargeback:=
+select
+  StrDatetime_to_StrDate(a.date_pay) as trans_date,
+  a.merchant_id as merchant_code,
+  nvl(b.site_id,0) as site_id,
+  nvl(b.site_name,'other') as site_name,
+  case when a.transaction_status in ('2次拒付','1次拒付','预仲裁') then -a.amount else amount end as transaction_amount,
+  a.currency as currency_code,
+  concat(a.transaction_type,'-',a.transaction_status) as transaction_type,
+  a.order_number as transaction_code,
+  b.order_id,
+  a.transaction_status,
+  b.if_swipe,
+  '' as card_type,
+  case when lower(a.transaction_type) = 'chargeback' and a.transaction_status in ('2次拒付','1次拒付','预仲裁') then 'chargeback'
+       when lower(a.transaction_type) = 'chargeback' and a.transaction_status in ('申诉成功') then 'chargeback_reversal'
+       else ''
+  end as chargeback_type
+from ods_looklook_mongodb_gltech_transactions a
+left join dwd_mapping_txn_order_site b
+on (a.order_number = b.txn_id and b.pay_type = 'xborder' and b.pt = '${date}')
+where a.pt = '${date}' and a.transaction_type = 'chargeback' and a.transaction_status !='1次拒付再请款';
+
+--paidy 目前只有退款的数据  没有拒付数据
+@paidy_trans_amount:=
+select
+  c.id,
+  c.store_name as merchant_code,
+  array_json(c.refunds,'amount') as refund_amount,
+  array_json(c.refunds,'created_at') as refund_date,
+  array_json(c.captures,'amount') as receive_amount,
+  array_json(c.captures,'created_at') as receive_date
+from ods_looklook_mongodb_paidy_transaction_detail c
+where c.pt = '${date}';
+
+@paidy_trans:=
+select
+  trans_array(2,',',a.id,a.merchant_code,a.refund_amount,a.refund_date,a.receive_amount,a.receive_date) as (payment_id,merchant_code,refund_amount,refund_date,receive_amount,receive_date)
+from @paidy_trans_amount a
+;
+@paidy_refund:=
+select
+    strdatetime_to_strdate(a.refund_date) as trans_date,
+    a.merchant_code,
+    nvl(b.site_id,0) as site_id,
+    nvl(b.site_name,'other') as site_name,
+    bigint(-a.refund_amount) as transaction_amount,
+    'JPY' as currency_code,
+    'refund' as transaction_type,
+     a.payment_id as transaction_code,
+     b.order_id,
+     b.if_swipe,
+     '' as card_type,
+     '' as chargeback_type
+from @paidy_trans a
+left join dwd_mapping_txn_order_site b
+on (a.payment_id = b.txn_id and b.pt = '${date}' and b.pay_type = 'paidy')
+where a.refund_date is not null
+;
+
+
+
+-- ebanx
+@ebanx_payment_order:=
+select
+  a.confirm_date,
+  b.site_id,
+  b.site_name,
+  a.currency_ext as currency_code,
+  a.merchant as merchant_code,
+  a.amount_ext as payments_received,
+  b.order_id,
+  nvl(b.if_swipe,0) as if_swipe,
+  a.payment_hash,
+  lower(a.country) as country,
+  case when lower(a.country) = 'brazil' then
+       case when lower(payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(payment_type_group) = 'boleto bancário' then 'boleto'
+            else 'bank_transfer'
+       end
+       when lower(a.country) = 'mexico' then
+       case when lower(payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(payment_type_group) = 'boleto bancário' then 'debit_card'
+            when lower(payment_type_group) = 'oxxo' then 'oxxo'
+            else 'bank_transfer'
+       end
+       when lower(a.country) = 'colombia' then
+       case when lower(payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(payment_type_group) = 'cartão de débito' then 'debit_card'
+            when lower(payment_type_group) in ('baloto','cash') then 'cash_payment'
+            else 'credit_card'
+       end
+       when lower(a.country) = 'chile' then
+       case when lower(payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(payment_type_group) = 'cartão de débito' then 'debit_card'
+            when lower(payment_type_group) in ('baloto','cash','sencillito') then 'cash_payment'
+            else 'credit_card'
+       end
+       when lower(a.country) = 'peru' then
+       case when lower(payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(payment_type_group) = 'cartão de débito' then 'debit_card'
+            when lower(payment_type_group) in ('baloto','cash','sencillito') then 'cash_payment'
+            else 'credit_card'
+       end
+       when lower(a.country) = 'argentina' then
+       case when lower(payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(payment_type_group) = 'cartão de débito' then 'debit_card'
+            when lower(payment_type_group) in ('baloto','cash','sencillito') then 'cash_payment'
+            else 'credit_card'
+       end
+  else 0
+  end as pay_method,
+  a.order_number
+from ods_looklook_mongodb_ebanx_transactions_data a
+left join dwd_mapping_txn_order_site b
+on (a.order_number = b.txn_id and b.pay_type = 'ebanx' and b.pt = '${date}')
+where a.pt = '${date}' and a.sheet_name = 'payment' and lower(a.status) = 'co'
+;
+
+@ebanx_refund_info:=
+select
+  b.order_number,
+  a.confirm_date,
+  a.currency_ext,
+  a.amount_ext as amount_ext,
+  a.merchant,
+  b.payment_hash,
+  b.country,
+  case when lower(a.country) = 'brazil' then
+       case when lower(a.payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(a.payment_type_group) = 'boleto bancário' then 'boleto'
+            else 'bank_transfer'
+       end
+       when lower(a.country) = 'mexico' then
+       case when lower(a.payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(a.payment_type_group) = 'boleto bancário' then 'debit_card'
+            when lower(a.payment_type_group) = 'oxxo' then 'oxxo'
+            else 'bank_transfer'
+       end
+       when lower(a.country) = 'colombia' then
+       case when lower(a.payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(a.payment_type_group) = 'cartão de débito' then 'debit_card'
+            when lower(a.payment_type_group) in ('baloto','cash') then 'cash_payment'
+            else 'credit_card'
+       end
+       when lower(a.country) = 'chile' then
+       case when lower(a.payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(a.payment_type_group) = 'cartão de débito' then 'debit_card'
+            when lower(a.payment_type_group) in ('baloto','cash','sencillito') then 'cash_payment'
+            else 'credit_card'
+       end
+       when lower(a.country) = 'peru' then
+       case when lower(a.payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(a.payment_type_group) = 'cartão de débito' then 'debit_card'
+            when lower(a.payment_type_group) in ('baloto','cash','sencillito') then 'cash_payment'
+            else 'credit_card'
+       end
+       when lower(a.country) = 'argentina' then
+       case when lower(a.payment_type_group) = 'cartão de crédito' then 'credit_card'
+            when lower(a.payment_type_group) = 'cartão de débito' then 'debit_card'
+            when lower(a.payment_type_group) in ('baloto','cash','sencillito') then 'cash_payment'
+            else 'credit_card'
+       end
+  else 0
+  end as pay_method
+from ods_looklook_mongodb_ebanx_transactions_data a
+inner join ods_looklook_mongodb_ebanx_transactions_data b
+on (a.payment_hash = b.payment_hash and lower(b.sheet_name) = 'payment' and lower(b.status) = 'co' and b.pt = '${date}')
+where a.pt = '${date}' and lower(a.sheet_name) = 'refund'
+;
+
+@ebanx_refund_order:=
+select
+  a.confirm_date,
+  b.site_id,
+  b.site_name,
+  a.currency_ext as currency_code,
+  a.merchant as merchant_code,
+  0 as payments_received,
+  0 as payments_fee,
+  0 as payments_commission,
+  -a.amount_ext as refunds,
+  0 as refunds_fee,
+  b.order_id,
+  0 as refunds_order_count,
+  0 as chargeback_order_count,
+  0 as charged_back_amount,
+  0 as charged_back_fee,
+  0 as charged_back_reverse_amount,
+  nvl(b.if_swipe,0) as if_swipe,
+  case when a.country = 'mexico' then 0.5 else 0.4 end refund_fee_usd,
+  a.order_number,
+  a.pay_method
+from @ebanx_refund_info a
+left join dwd_mapping_txn_order_site b
+on (a.order_number = b.txn_id and b.pay_type = 'ebanx' and b.pt = '${date}')
+;
+@ebanx_pay_info:=
+select
+ a.site_id,
+ a.site_name,
+ a.if_swipe,
+ a.currency_code,
+ a.payments_received-nvl(b.amount_ext,0) as remaind_payments,
+ a.payments_received,
+ b.amount_ext,
+ b.currency_ext,
+ a.payment_hash,
+ a.merchant_code,
+ a.order_id,
+ a.pay_method,
+ a.order_number
+from @ebanx_payment_order a
+left join @ebanx_refund_info b
+on (a.payment_hash = b.payment_hash)
+;
+@ebanx_chargeback_order:=
+select
+  a.chargeback_date,
+  b.site_name,
+  b.site_id,
+  b.if_swipe,
+  b.currency_code,
+  case when lower(a.sheet_name) = 'chargeback' then -b.remaind_payments else b.remaind_payments end as chargeback_acmout,
+  b.merchant_code,
+--  b.remaind_payments*cct.currency_transform as chargeback_acmout_usd,
+  a.description,
+  b.order_number as payment_hash,
+  b.order_id,
+  a.sheet_name as journal_type,
+  case when lower(a.sheet_name) = 'chargeback' then 'chargeback'
+       when lower(a.sheet_name) = 'reversal' then 'chargeback_reversal'
+       else ''
+  end as chargeback_type,
+  b.pay_method,
+  a.reason_code as reasoncode
+from ods_looklook_mongodb_ebanx_transactions_data a
+inner join
+(
+  select a.payment_hash,a.currency_code,a.remaind_payments,a.site_id,a.site_name,a.if_swipe,a.merchant_code,a.order_id,a.pay_method,a.order_number
+  from @ebanx_pay_info a group by a.payment_hash,a.currency_code,a.remaind_payments,a.site_id,a.site_name,a.if_swipe,a.merchant_code,a.order_id,a.pay_method,a.order_number
+) b
+on (a.payment_hash =b.payment_hash)
+where a.pt = '${date}' and a.sheet_name rlike  'chargeback';
+
+
+--select * from @ebanx_chargeback_order;
+
+
+@charge_back_detail :=
+select
+   to_char(t1.date_beijing,'yyyymmdd') as trans_date
+  ,t1.merchant_code
+  ,soi.business_unit_name
+  ,nvl(t2.site_id,0) as site_id
+  ,nvl(t2.site_name,'other') as site_name
+  ,soi.site_type_id
+  ,t1.status
+  ,t1.currency_code
+  ,t1.amount
+  ,cct.currency_transform
+  ,t1.transaction_code
+  ,t2.order_id
+  ,t3.chargeback_code
+  ,t3.journal_type
+  ,t4.chargeback_description
+  ,'worldpay' as payment_type
+  ,t2.if_swipe
+  ,cct.currency_transform_cny
+  ,t1.payment_method as card_type
+  ,case when status = 'CHARGED_BACK' then 'chargeback' else 'chargeback_reversal' end as chargeback_type
+  ,'' as resovle_status
+  ,t4.chargeback_code as reasoncode
+from ods_looklook_mongodb_worldpay_info t1
+left join dwd_mapping_txn_order_site t2
+on t1.transaction_code=t2.txn_id and t2.pay_type='worldpay' and t2.pt='${date}'
+left join @site_org_info soi
+on t2.site_id=soi.site_id and to_char(t1.date_beijing,'yyyymm') = soi.date_month
+left join (
+  select
+     order_code
+    ,chargeback_code
+    ,journal_type
+    ,row_number() over(distribute by order_code sort by create_time desc) as rn
+  from ods_looklook_mongodb_worldpay_chargeback_info
+  where pt=max_pt('ods_looklook_mongodb_worldpay_chargeback_info')
+
+)t3
+on t1.transaction_code=t3.order_code and t3.rn=1
+left join (
+  select
+     order_code
+    ,chargeback_description
+    ,row_number() over(distribute by order_code sort by create_time desc) as rn
+    ,a.chargeback_code
+  from ods_looklook_mongodb_worldpay_chargeback_info a
+  where pt=max_pt('ods_looklook_mongodb_worldpay_chargeback_info') and a.chargeback_description is not null and length(a.chargeback_description)>0
+
+) t4
+on (t1.transaction_code=t4.order_code and t4.rn =1)
+left join dwd_com_currency_transform cct
+on to_char(t1.date_beijing,'yyyymmdd')=cct.data_dt and t1.currency_code=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where t1.pt=max_pt('ods_looklook_mongodb_worldpay_info')
+and t1.status in ('CHARGED_BACK','CHARGEBACK_REVERSED')
+union all
+select
+     to_char(t1.transaction_date,'yyyymmdd') as trans_date
+    ,t1.paypal_shop_account as shop_account
+    ,soi.business_unit_name
+    ,nvl(t3.site_id,0) as site_id
+    ,nvl(t3.site_name,'other') as  site_name
+    ,soi.site_type_id
+    ,t1.transaction_event_code as status
+    ,t1.transaction_amount_curreny_code as currency_code
+    ,t1.transaction_amount_value
+    ,cct.currency_transform
+    ,t1.transaction_id
+    ,t3.order_id
+    ,t4.dispute_channel
+    ,t4.dispute_life_cycle_stage
+    ,t4.reason
+    ,'paypal' as payment_type
+    ,t3.if_swipe
+    ,cct.currency_transform_cny
+    ,'' as card_type
+    ,case when t1.transaction_event_code in('T1110','T1201','T1106','T1116') and t1.transaction_amount_value<0 then 'chargeback'
+          else 'chargeback_reversal'
+     end as chargeback_type
+     ,t4.status as resovle_status
+     ,t4.reasoncode
+from ods_looklook_mongodb_paypal_transaction_info t1
+left join ods_looklook_mongodb_paypal_transaction_info t2
+on t1.paypal_reference_id=t2.transaction_id and t2.pt = '${date}'
+left join dwd_mapping_txn_order_site t3
+on nvl(t2.paypal_reference_id,nvl(t1.paypal_reference_id,t1.transaction_id))=t3.txn_id and t3.pay_type='paypal' and t3.pt='${date}'
+left join @site_org_info soi
+on t3.site_id=soi.site_id  and to_char(t1.transaction_date,'yyyymm') = soi.date_month
+left join
+(
+    select
+        reason,
+        seller_transaction_id,
+        dispute_channel,
+        dispute_life_cycle_stage,
+        status,
+        row_number() over(distribute by seller_transaction_id sort by format_shopify_date(create_time) desc) as rn,
+        '' as reasoncode
+    from ods_looklook_mongodb_paypal_dispute_detail_info
+    where pt='${date}'
+
+)t4
+on t2.transaction_id=t4.seller_transaction_id and t4.rn=1
+left join dwd_com_currency_transform cct
+on to_char(t1.transaction_date,'yyyymmdd')=cct.data_dt and t1.transaction_amount_curreny_code=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where t1.pt='${date}'
+and
+ (
+     (t1.transaction_event_code in('T1110','T1201','T1106','T1116') and t1.transaction_amount_value<0)
+  or (t1.transaction_event_code in ('T1111','T1202','T1106','T1114')  and t1.transaction_amount_value>0)
+
+ )
+union all
+select
+    a.trans_date as trans_date,
+    a.shop_account,
+    c.business_unit_name,
+    b.site_id,
+    b.site_name,
+    c.site_type_id,
+    case when a.trans_amonut <0 then 'chargeback' else 'chargeback_reversed'  end as chargeback_stage,
+    a.currency_code as currency_code,
+    a.trans_amonut as dispute_amount,
+    cct.currency_transform as currency_transform,
+    b.transaction_id  as seller_transaction_id,
+    b.order_no as order_id,
+    '' as charge_type,
+    case when a.trans_amonut <0 then 'chargeback' else 'chargeback_reversed'  end as chargeback_stage,
+    a.deductionreasondescription as reason,
+    'ingenico' as payment_type,
+    '0' as if_swipe,
+    cct.currency_transform_cny,
+    a.creditcardcompany as card_type,
+    case when a.trans_amonut <0 then 'chargeback' else 'chargeback_reversal'  end as chargeback_type,
+    '' as resovle_status,
+    a.reasoncode
+from
+(
+    select
+      a.id,
+      case  when a.customerid is null and instr(a.additionalreference,'-')>0 then  replace(a.additionalreference,a.effortid,'01')
+            else a.additionalreference
+      end  as new_additionalreference,
+      a.deductionreasondescription,
+      case when paymentstatus = '1500' then -a.paymentamount/100 else a.paymentamount/100  end as trans_amonut,
+      case when paymentstatus = '1500' then -a.remittedamount/100 else a.remittedamount/100  end as trans_amonut_usd,
+      a.paymentcurrency as currency_code,
+      a.merchantid as shop_account,
+      a.file_time as trans_date,
+      a.creditcardcompany,
+      a.deductionreasonid as reasoncode
+    from ods_looklook_mongodb_inpay a
+    where a.pt = '${date}' and a.paymentstatus in ('1500','1030')
+)a
+join (select distinct transaction_id,order_no,site_id,site_name from dwd_looklook_ingenico_order_info b where  b.pt = '${date}') b
+on (a.new_additionalreference = b.transaction_id)
+left join @site_org_info c
+on b.site_id = c.site_id and substring(a.trans_date,1,6) = c.date_month
+left join dwd_com_currency_transform cct
+on a.trans_date=cct.data_dt and a.currency_code=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+union all
+select
+   to_char(to_date(t1.booking_date,'yyyy-mm-dd hh:mi:ss'),'yyyymmdd') as trans_date
+  ,t1.merchant_account as merchant_code
+  ,soi.business_unit_name
+  ,nvl(t2.site_id,0) as site_id
+  ,nvl(t2.site_name,'other') as site_name
+  ,soi.site_type_id
+  ,t1.record_type as status
+  ,t1.main_currency as currency_code
+  ,cast(case when t1.record_type in ('Chargeback','SecondChargeback') then t1.payable__sc + nvl(t1.commission__sc,0) + nvl(t1.markup__sc,0)+nvl(t1.scheme_fees__sc,0)+nvl(t1.interchange__sc,0)
+             else t1.payable__sc
+        end  as decimal) as amount
+  ,cct.currency_transform
+  ,t1.psp_reference
+  ,t2.order_id
+  ,t3.payment_method as chargeback_code
+  ,t3.record_type as journal_type
+  ,t3.dispute_reason as chargeback_description
+  ,'adyen' as payment_type
+  ,t2.if_swipe
+  ,cct.currency_transform_cny
+  ,t1.payment_method as card_type
+  ,case when lower(t1.record_type) in ('Chargeback','SecondChargeback') then 'chargeback' else 'chargeback_reversal' end as chargeback_type
+  ,'' as resovle_status
+  ,t3.reasoncode
+from ods_looklook_mongodb_adyen_transaction t1
+left join dwd_mapping_txn_order_site t2
+on t1.psp_reference=t2.txn_id and t2.pay_type='adyen' and t2.pt='${date}'
+left join @site_org_info soi
+on t2.site_id=soi.site_id and to_char(to_date(t1.booking_date,'yyyy-mm-dd hh:mi:ss'),'yyyymm') = soi.date_month
+left join (
+  select
+     a.psp_reference
+    ,a.payment_method
+    ,case  when a.dispute_reason rlike 'ReasonCode' then 'ReasonCode'
+           when a.dispute_reason rlike 'CBK0400181 NOT AS DESCRIBED' then 'CBK0400181 NOT AS DESCRIBED'
+           when a.dispute_reason rlike 'CBK0400163 DEBIT FOR FRAUDULENT TRANSACTION' then 'CBK0400163 DEBIT FOR FRAUDULENT TRANSACTION'
+           when a.dispute_reason rlike 'CBK0400152 DEBIT FOR FULL RECOURSE ADDENDUM' then 'CBK0400152 DEBIT FOR FULL RECOURSE ADDENDUM'
+           when a.dispute_reason rlike 'CBK0400135 DEBIT AS CREDIT NOT RECEIVED BY CUSTOMER' then 'CBK0400135 DEBIT AS CREDIT NOT RECEIVED BY CUSTOMER'
+           when a.dispute_reason rlike 'CBK0400045 GOODS NOT RECEIVED' then 'CBK0400045 GOODS NOT RECEIVED'
+           when a.dispute_reason rlike 'CBK0400020 DEBIT FOR DUPLICATE CHARGE' then 'CBK0400020 DEBIT FOR DUPLICATE CHARGE'
+           else a.dispute_reason
+     end dispute_reason
+    ,a.record_type
+    ,row_number() over(distribute by a.psp_reference sort by a.record_date desc) as rn
+    ,concat(a.cb_scheme_code,'_',a.cb_reason_code) as reasoncode
+  from ods_looklook_mongodb_adyen_dispute a
+  where pt=max_pt('ods_looklook_mongodb_adyen_dispute')
+
+)t3
+on t1.psp_reference=t3.psp_reference and t3.rn=1
+left join dwd_com_currency_transform cct
+on to_char(to_date(t1.booking_date,'yyyy-mm-dd hh:mi:ss'),'yyyymmdd')=cct.data_dt and t1.main_currency=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where t1.pt=max_pt('ods_looklook_mongodb_adyen_transaction')
+and t1.record_type in ('Chargeback','ChargebackReversed','SecondChargeback')
+union all
+select
+   t1.trans_date as trans_date
+  ,t1.merchant_account as merchant_code
+  ,soi.business_unit_name
+  ,nvl(t2.site_id,0) as site_id
+  ,nvl(t2.site_name,'other') as site_name
+  ,soi.site_type_id
+  ,t1.breakdown_type as status
+  ,t1.payment_currency as currency_code
+  ,cast(t1.processing_currency_amount as decimal) as amount
+  ,cct.currency_transform
+  ,t1.payment_id
+  ,t2.order_id
+  ,'' as chargeback_code
+  ,t1.action_type as journal_type
+  ,t3.category as chargeback_description
+  ,'checkout' as payment_type
+  ,t2.if_swipe
+  ,cct.currency_transform_cny
+  ,t1.card_type
+  ,t1.chargeback_type
+  ,'' as resovle_status
+  ,'' as reasoncode
+from @checkout_trans t1
+left join (select t2.site_id,t2.site_name,t2.unique_id as txn_id,t2.order_id,t2.if_swipe from dwd_mapping_txn_order_site t2 where  t2.pay_type='checkout' and t2.pt='${date}' group by t2.site_id,t2.site_name,t2.unique_id,t2.order_id,t2.if_swipe) t2
+on t1.reference=t2.txn_id
+left join @site_org_info soi
+on t2.site_id=soi.site_id and substring(t1.trans_date,1,6) = soi.date_month
+left join (
+  select
+     a.payment_reference
+    ,a.payment_method
+    ,a.category
+    ,a.status
+    ,row_number() over(distribute by a.payment_reference sort by a.received_on desc) as rn
+  from ods_looklook_mongodb_checkout_dispute_data a
+  where pt=max_pt('ods_looklook_mongodb_checkout_dispute_data')
+
+)t3
+on t1.reference=t3.payment_reference and t3.rn=1
+left join dwd_com_currency_transform cct
+on t1.trans_date=cct.data_dt and t1.payment_currency=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where  t1.breakdown_type rlike 'chargeback' or t1.breakdown_type rlike 'chargeback_reversal'
+union all
+select
+   to_char(to_date(t1.createdate,'yyyy-mm-dd hh:mi:ss'),'yyyymmdd') as trans_date
+  ,t1.accid
+  ,soi.business_unit_name
+  ,nvl(t2.site_id,0) as site_id
+  ,nvl(t2.site_name,'other') as site_name
+  ,soi.site_type_id
+  ,t1.chargebacktype
+  ,t1.currency
+  ,cast(case when chargebacktype in ('1st_chargeback','2nd_chargeback') then -t1.amount else t1.amount end as decimal) as amount
+  ,cct.currency_transform
+  ,t1.transactionid
+  ,t2.order_id
+  ,t1.reasoncode as chargeback_code
+  ,t1.chargebacktype as journal_type
+  ,t1.reasonDescription as chargeback_description
+  ,'pingpong' as payment_type
+  ,t2.if_swipe
+  ,cct.currency_transform_cny
+  ,t1.cardscheme as card_type
+  ,case when chargebacktype in ('1st_chargeback','2nd_chargeback') then 'chargeback' else 'chargeback_reversal' end as chargeback_type
+  ,'' as resovle_status
+  ,concat(t1.cardscheme,'_',t1.reasoncode) as reasoncode
+from ods_looklook_mongodb_pingpong_chargeback t1
+left join dwd_mapping_txn_order_site t2
+on t1.transactionid=t2.txn_id and t2.pay_type='pingpong' and t2.pt='${date}'
+left join @site_org_info soi
+on t2.site_id=soi.site_id and to_char(to_date(t1.createdate,'yyyy-mm-dd hh:mi:ss'),'yyyymm') = soi.date_month
+left join dwd_com_currency_transform cct
+on to_char(to_date(t1.createdate,'yyyy-mm-dd hh:mi:ss'),'yyyymmdd')=cct.data_dt and t1.currency=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where t1.pt=max_pt('ods_looklook_mongodb_pingpong_chargeback')
+union all
+select
+    to_char(a.detime,'yyyymmdd') as trans_date,
+    a.merchant_code,
+    soi.business_unit_name as business_unit_name,
+    a.site_id,
+    a.site_name,
+    soi.site_type_id as site_type_id,
+    a.transproperty,
+    a.currency_code,
+    a.demoney,
+    cct.currency_transform,
+    a.merchantno,
+    a.order_id,
+    b1.chargeback_id,
+    b1.port_status,
+    b1.remark,
+    'pacypay' as payment_type,
+    a.if_swipe,
+    cct.currency_transform_cny,
+    a.card_type,
+    a.chargeback_type,
+    '' as resovle_status,
+    '' as reasoncode
+from (select * from @pacypay_order_info a where a.transproperty = '拒付') a
+left join (
+  select b1.transaction_id,trim(regexp_replace(b1.remark,'[^a-zA-Z\\s]',' ')) as remark,b1.port_status,b1.chargeback_id,row_number() over (partition by b1.transaction_id order by b1.chargeback_time desc) as rn
+  from ods_looklook_mongodb_pacypay_transaction  b1 where b1.pt = '${date}' and b1.port_status = 'chargeback'
+) b1
+on (a.merchantno = b1.transaction_id and b1.rn =1)
+left join dwd_com_currency_transform cct
+on to_char(a.detime,'yyyymmdd')=cct.data_dt and a.currency_code=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+left join @site_org_info soi
+on a.site_id=soi.site_id and to_char(a.detime,'yyyymm') = soi.date_month
+union all
+select
+   to_char(dateadd(format_shopify_date(a.charged_back_date),-8,'hh'),'yyyymmdd') as trans_date,
+   b.merchant_code,
+   soi.business_unit_name as business_unit_name,
+   c.site_id,
+   c.site_name,
+   soi.site_type_id,
+   a.status,
+   a.currency_code,
+   decimal(a.charged_back_amount) as charged_back_amount,
+   cct.currency_transform,
+   a.trans_id,
+   c.order_id,
+   '' as chargeback_code,
+   a.status as journal_type,
+   '' as chargeback_description,
+   'cardpay' as payment_type,
+   c.if_swipe,
+   cct.currency_transform_cny,
+   a.card_type,
+   a.chargeback_type,
+   '' as resovle_status,
+   '' as reasoncode
+from @charged_back_info a
+inner join @cardpay_trans_infos b
+on (a.trans_id = b.trans_id)
+left join dwd_mapping_txn_order_site c
+on (a.trans_id = c.txn_id and c.pay_type = 'cardpay' and c.pt = '${date}')
+left join dwd_com_currency_transform cct
+on (a.currency_code = cct.currency_code and to_char(dateadd(format_shopify_date(a.charged_back_date),-8,'hh'),'yyyymmdd') = cct.data_dt and cct.pt = '${date}')
+left join @site_org_info soi
+on c.site_id=soi.site_id and to_char(dateadd(format_shopify_date(a.charged_back_date),-8,'hh'),'yyyymm') = soi.date_month
+union all
+select
+  replace(a.transaction_date,'-','') as trans_date,
+  a.merchant_code as merchant_code,
+  soi.business_unit_name as business_unit_name,
+  a.site_id,
+  a.site_name,
+  soi.site_type_id as site_type_id,
+  a.transaction_type as status,
+  a.currency_code,
+  case when lower(a.transaction_type) in ('1st chargeback','2nd chargeback','1st chargeback allocation','re-presentment reversal') then -cast(a.transaction_amount as decimal)
+       when lower(a.transaction_type) in ('re-presentment','1st chargeback reversal') then cast(a.transaction_amount as decimal)
+  end as charged_back_amount,
+  cct.currency_transform as currency_transform,
+  a.request_id as trans_id,
+  a.order_id,
+  '' as chargeback_code,
+  a.transaction_type as journal_type,
+  a.reason_desc as chargeback_description,
+  'credorax' as payment_type,
+  a.if_swipe,
+  cct.currency_transform_cny,
+  a.card_type,
+  a.chargeback_type,
+  '' as resovle_status
+  ,a.reasoncode
+from @credorax_chargeback_info a
+left join dwd_com_currency_transform cct
+on (a.currency_code = cct.currency_code and replace(a.transaction_date,'-','') = cct.data_dt and cct.pt = '${date}')
+left join @site_org_info soi
+on a.site_id=soi.site_id and substring(replace(a.transaction_date,'-',''),1,6) = soi.date_month
+where lower(a.transaction_type) not like '%retrieval%'
+union all
+select
+  a.trans_date as trans_date,
+  a.merchant_code as merchant_code,
+  soi.business_unit_name as business_unit_name,
+  a.site_id,
+  a.site_name,
+  soi.site_type_id as site_type_id,
+  a.transaction_type as status,
+  a.currency_code,
+  cast(a.transaction_amount as decimal) as charged_back_amount,
+  cct.currency_transform as currency_transform,
+  a.transaction_code as trans_id,
+  a.order_id,
+  '' as chargeback_code,
+  a.transaction_status as journal_type,
+  ' ' as chargeback_description,
+  'xborder' as payment_type,
+  a.if_swipe,
+  cct.currency_transform_cny,
+  a.card_type,
+  a.chargeback_type,
+  '' as resovle_status,
+  '' as reasoncode
+from @xborder_chargeback a
+left join dwd_com_currency_transform cct
+on (a.currency_code = cct.currency_code and a.trans_date = cct.data_dt and cct.pt = '${date}')
+left join @site_org_info soi
+on a.site_id=soi.site_id and substring(a.trans_date,1,6) = soi.date_month
+union all
+select
+  replace(a.chargeback_date,'-','') as trans_date,
+  a.merchant_code as merchant_code,
+  soi.business_unit_name as business_unit_name,
+  a.site_id,
+  a.site_name,
+  soi.site_type_id as site_type_id,
+  a.journal_type as status,
+  a.currency_code,
+  cast(a.chargeback_acmout as decimal) as charged_back_amount,
+  cct.currency_transform as currency_transform,
+  a.payment_hash as trans_id,
+  a.order_id,
+  '' as chargeback_code,
+  a.journal_type as journal_type,
+  a.description as chargeback_description,
+  'ebanx' as payment_type,
+  a.if_swipe,
+  cct.currency_transform_cny,
+  a.pay_method as card_type,
+  a.chargeback_type,
+  '' as resovle_status,
+  a.reasoncode
+from @ebanx_chargeback_order a
+left join dwd_com_currency_transform cct
+on (a.currency_code = cct.currency_code and replace(a.chargeback_date,'-','') = cct.data_dt and cct.pt = '${date}')
+left join @site_org_info soi
+on a.site_id=soi.site_id and substring(replace(a.chargeback_date,'-',''),1,6) = soi.date_month
+union all
+select
+  replace(substring(accounting_time,1,10),'-','') as trans_date,
+  a.terminal_number as merchant_code,
+  soi.business_unit_name as business_unit_name,
+  b.site_id,
+  b.site_name,
+  soi.site_type_id as site_type_id,
+  a.transaction_type as status,
+  a.transaction_currency as currency_code,
+  cast(a.transaction_amount as decimal) as charged_back_amount,
+  cct.currency_transform as currency_transform,
+  a.account_order_code as trans_id,
+  b.order_id,
+  '' as chargeback_code,
+  a.transaction_type as journal_type,
+  '' as chargeback_description,
+  'oceanpaycash' as payment_type,
+  b.if_swipe,
+  cct.currency_transform_cny,
+  a.cards as card_type,
+  case when a.transaction_type = '拒付' then 'chargeback' else 'chargeback_reversal' end as chargeback_type,
+  '' as resovle_status,
+  '' as reasoncode
+from ods_looklook_mongodb_oceanpaycash_transactions_detail a
+left join dwd_mapping_txn_order_site b
+on (a.account_order_code = b.txn_id and b.pt = '${date}' and b.pay_type = 'oceanpaycash')
+left join dwd_com_currency_transform cct
+on (a.transaction_currency = cct.currency_code and replace(substring(accounting_time,1,10),'-','') = cct.data_dt and cct.pt = '${date}')
+left join @site_org_info soi
+on b.site_id=soi.site_id and substring(replace(substring(accounting_time,1,10),'-',''),1,6) = soi.date_month
+where a.transaction_type in ('拒付','申诉成功') and a.pt = '${date}'
+union all
+select
+  t.data_dt as trans_date,
+  t.merchant_code as merchant_code,
+  soi.business_unit_name as business_unit_name,
+  t.site_id,
+  t.site_name,
+  soi.site_type_id as site_type_id,
+  t.chargeback_type as status,
+  t.currency_code,
+  t.dispute_amount,
+  t.currency_transform,
+  t.trans_id,
+  t.order_id,
+  '' as chargeback_code,
+  t.journal_type as journal_type,
+  lower(t.dispute_reason_type) as chargeback_description,
+  t.payment_type,
+  t.if_swipe,
+  t.currency_transform_cny,
+  t.card_type,
+  t.chargeback_type,
+  '' as resovle_status,
+  concat(t.card_type,'_',t.reason_code) as reasoncode
+from @airwallex_chargeback_infos t
+left join @site_org_info soi
+on t.site_id=soi.site_id and substring(t.data_dt,1,6) = soi.date_month
+union all
+-- stripe 拒付信息
+select
+  t.data_dt as trans_date,
+  t.merchant_code as merchant_code,
+  soi.business_unit_name as business_unit_name,
+  t.site_id,
+  t.site_name,
+  soi.site_type_id as site_type_id,
+  t.chargeback_type as status,
+  t.currency_code,
+  t.dispute_amount,
+  t.currency_transform,
+  t.trans_id,
+  t.order_id,
+  '' as chargeback_code,
+  t.journal_type as journal_type,
+  lower(t.dispute_reason_type) as chargeback_description,
+  t.payment_type,
+  t.if_swipe,
+  t.currency_transform_cny,
+  t.card_type,
+  t.chargeback_type,
+  '' as resovle_status,
+  '' as reasoncode
+from @stripe_chargeback_infos t
+left join @site_org_info soi
+on t.site_id=soi.site_id and substring(t.data_dt,1,6) = soi.date_month
+;
+
+@afterpay_refund_info:=
+select
+  t.id,
+  get_json_object(t.amount_json,'$.currency') as currency_code,
+  get_json_object(t.amount_json,'$.amount') as amount,
+  to_char(format_shopify_date(t.refund_at),'yyyymmdd') as trans_date
+from
+(
+   select
+    a.id,
+    replace(if(size(split(array_json(a.refunds,'amount'),',{'))=1,array_json(a.refunds,'amount'),concat('{',split(array_json(a.refunds,'amount'),',{')
+    [size((split(array_json(a.refunds,'amount'),',{')))-1])),"'",'"') as amount_json,
+    split(array_json(a.refunds,'refundedAt'),',')[size((split(array_json(a.refunds,'refundedAt'),',')))-1] as refund_at
+  from ods_looklook_mongodb_afterpay_payments a
+  where a.pt = '${date}' and a.refunds is  not null
+) t
+group by t.id,t.amount_json,t.refund_at
+;
+
+
+@refunds_detail:=
+select
+   to_char(t1.date_beijing,'yyyymmdd') as trans_date
+  ,t1.merchant_code
+  ,soi.business_unit_name
+  ,nvl(t2.site_id,0) as site_id
+  ,nvl(t2.site_name,'other') as site_name
+  ,soi.site_type_id
+  ,t1.status
+  ,t1.currency_code
+  ,t1.amount
+  ,cct.currency_transform
+  ,t1.transaction_code
+  ,t2.order_id
+  ,t3.chargeback_code
+  ,t3.journal_type
+  ,t3.chargeback_description
+  ,'worldpay' as payment_type
+  ,t2.if_swipe
+  ,cct.currency_transform_cny
+  ,t1.payment_method as card_type
+  ,'' as chargeback_type
+  ,'' as resovle_status
+from ods_looklook_mongodb_worldpay_info t1
+left join dwd_mapping_txn_order_site t2
+on t1.transaction_code=t2.txn_id and t2.pay_type='worldpay' and t2.pt='${date}'
+left join @site_org_info soi
+on t2.site_id=soi.site_id and to_char(t1.date_beijing,'yyyymm') = soi.date_month
+left join (
+  select
+     order_code
+    ,chargeback_code
+    ,chargeback_description
+    ,journal_type
+    ,row_number() over(distribute by order_code sort by create_time desc) as rn
+  from ods_looklook_mongodb_worldpay_chargeback_info
+  where pt=max_pt('ods_looklook_mongodb_worldpay_chargeback_info')
+
+)t3
+on t1.transaction_code=t3.order_code and t3.rn=1
+left join dwd_com_currency_transform cct
+on to_char(t1.date_beijing,'yyyymmdd')=cct.data_dt and t1.currency_code=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where t1.pt=max_pt('ods_looklook_mongodb_worldpay_info')
+and t1.status in ('REFUNDED')
+union all
+select
+   ari.trans_date as trans_date
+  ,ap.merchant_code
+  ,soi.business_unit_name
+  ,nvl(b.site_id,0) as site_id
+  ,nvl(b.site_name,'other') as site_name
+  ,soi.site_type_id
+  ,'refund' as status
+  ,ari.currency_code as currency_code
+  ,-ari.amount as amount
+  ,cct.currency_transform
+  ,ap.token as transaction_code
+  ,b.order_id
+  ,'' as chargeback_code
+  ,'' as journal_type
+  ,'' as chargeback_description
+  ,'afterpay' as payment_type
+  ,b.if_swipe
+  ,cct.currency_transform_cny
+  ,''as card_type
+  ,'' as chargeback_type
+  ,'' as resovle_status
+from @afterpay_refund_info ari
+inner join ods_looklook_mongodb_afterpay_payments ap
+on (ari.id = ap.id and ap.pt = '${date}' and ap.refunds is null)
+left join dwd_mapping_txn_order_site b
+on (ap.token = b.txn_id and b.pay_type = 'afterpay' and b.pt = '${date}')
+left join @site_org_info soi
+on b.site_id=soi.site_id and substring(ari.trans_date,1,6) = soi.date_month
+left join dwd_com_currency_transform cct
+on ari.trans_date=cct.data_dt and ari.currency_code=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where 1=1
+union all
+select
+     to_char(t1.transaction_date,'yyyymmdd') as trans_date
+    ,t1.paypal_shop_account as shop_account
+    ,soi.business_unit_name
+    ,nvl(t3.site_id,0) as site_id
+    ,nvl(t3.site_name,'other') as  site_name
+    ,soi.site_type_id
+    ,t1.transaction_event_code as status
+    ,t1.transaction_amount_curreny_code as currency_code
+    ,t1.transaction_amount_value
+    ,cct.currency_transform
+    ,t1.transaction_id
+    ,t3.order_id
+    ,t4.dispute_channel
+    ,t4.dispute_life_cycle_stage
+    ,t4.reason
+    ,'paypal' as payment_type
+    ,t3.if_swipe
+    ,cct.currency_transform_cny
+    ,'' as card_type
+    ,'' as chargeback_type
+    ,t4.status as resovle_status
+from ods_looklook_mongodb_paypal_transaction_info t1
+left join ods_looklook_mongodb_paypal_transaction_info t2
+on t1.paypal_reference_id=t2.transaction_id and t2.pt = '${date}'
+left join dwd_mapping_txn_order_site t3
+on nvl(t2.paypal_reference_id,nvl(t1.paypal_reference_id,t1.transaction_id))=t3.txn_id and t3.pay_type='paypal' and t3.pt='${date}'
+left join @site_org_info soi
+on t3.site_id=soi.site_id and to_char(t1.transaction_date,'yyyymm') = soi.date_month
+left join
+(
+    select
+        reason,
+        seller_transaction_id,
+        dispute_channel,
+        dispute_life_cycle_stage,
+        status,
+        row_number() over(distribute by seller_transaction_id sort by format_shopify_date(create_time) desc) as rn
+    from ods_looklook_mongodb_paypal_dispute_detail_info
+    where pt='${date}'
+
+)t4
+on t2.transaction_id=t4.seller_transaction_id and t4.rn=1
+left join dwd_com_currency_transform cct
+on to_char(t1.transaction_date,'yyyymmdd')=cct.data_dt and t1.transaction_amount_curreny_code=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where t1.pt='${date}'
+and t1.transaction_event_code  =  'T1107' and t1.transaction_amount_value<0
+union all
+select
+    a.trans_date as trans_date,
+    a.shop_account,
+    c.business_unit_name,
+    b.site_id,
+    b.site_name,
+    c.site_type_id,
+    case when a.trans_amonut <0 then 'refunded' else 'refunded_return'  end as chargeback_stage,
+    a.currency_code as currency_code,
+    a.trans_amonut as dispute_amount,
+    cct.currency_transform as currency_transform,
+    b.transaction_id  as seller_transaction_id,
+    b.order_no as order_id,
+    '' as charge_type,
+    case when a.trans_amonut <0 then 'refunded' else 'refunded_return'  end as chargeback_stage,
+    a.deductionreasondescription as reason,
+    'ingenico' as payment_type,
+    '0' as if_swipe,
+    cct.currency_transform_cny,
+    a.creditcardcompany as card_type,
+    '' as chargeback_type,
+    '' as resovle_status
+from
+(
+    select
+      a.id,
+      case  when a.customerid is null and instr(a.additionalreference,'-')>0 then  replace(a.additionalreference,a.effortid,'01')
+            else a.additionalreference
+      end  as new_additionalreference,
+      a.deductionreasondescription,
+      case when paymentstatus = '1800' then -a.paymentamount/100 else a.paymentamount/100  end as trans_amonut,
+      case when paymentstatus = '1800' then -a.remittedamount/100 else a.remittedamount/100  end as trans_amonut_usd,
+      a.paymentcurrency as currency_code,
+      a.merchantid as shop_account,
+      a.file_time as trans_date,
+      a.creditcardcompany
+    from ods_looklook_mongodb_inpay a
+    where a.pt = '${date}' and a.paymentstatus in ('1800','1850')
+)a
+join (select distinct transaction_id,order_no,site_id,site_name from dwd_looklook_ingenico_order_info b where  b.pt = '${date}') b
+on (a.new_additionalreference = b.transaction_id)
+left join @site_org_info c
+on b.site_id = c.site_id and substring(a.trans_date,1,6) = c.date_month
+left join dwd_com_currency_transform cct
+on a.trans_date=cct.data_dt and a.currency_code=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+union all
+select
+   to_char(to_date(t1.booking_date,'yyyy-mm-dd hh:mi:ss'),'yyyymmdd') as trans_date
+  ,t1.merchant_account as merchant_code
+  ,soi.business_unit_name
+  ,nvl(t2.site_id,0) as site_id
+  ,nvl(t2.site_name,'other') as site_name
+  ,soi.site_type_id
+  ,t1.record_type as status
+  ,t1.payment_currency as currency_code
+  ,cast(-t1.captured__pc as decimal) as amount
+  ,cct.currency_transform
+  ,t1.psp_reference
+  ,t2.order_id
+  ,t3.payment_method as chargeback_code
+  ,t3.record_type as journal_type
+  ,t3.dispute_reason as chargeback_description
+  ,'adyen' as payment_type
+  ,t2.if_swipe
+  ,cct.currency_transform_cny
+  ,t1.payment_method as card_type
+  ,'' as chargeback_type
+  ,'' as resovle_status
+from ods_looklook_mongodb_adyen_transaction t1
+left join dwd_mapping_txn_order_site t2
+on t1.psp_reference=t2.txn_id and t2.pay_type='adyen' and t2.pt='${date}'
+left join @site_org_info soi
+on t2.site_id=soi.site_id and to_char(to_date(t1.booking_date,'yyyy-mm-dd hh:mi:ss'),'yyyymm') = soi.date_month
+left join (
+  select
+     a.psp_reference
+    ,a.payment_method
+    ,case  when a.dispute_reason rlike 'ReasonCode' then 'ReasonCode'
+           when a.dispute_reason rlike 'CBK0400181 NOT AS DESCRIBED' then 'CBK0400181 NOT AS DESCRIBED'
+           when a.dispute_reason rlike 'CBK0400163 DEBIT FOR FRAUDULENT TRANSACTION' then 'CBK0400163 DEBIT FOR FRAUDULENT TRANSACTION'
+           when a.dispute_reason rlike 'CBK0400152 DEBIT FOR FULL RECOURSE ADDENDUM' then 'CBK0400152 DEBIT FOR FULL RECOURSE ADDENDUM'
+           when a.dispute_reason rlike 'CBK0400135 DEBIT AS CREDIT NOT RECEIVED BY CUSTOMER' then 'CBK0400135 DEBIT AS CREDIT NOT RECEIVED BY CUSTOMER'
+           when a.dispute_reason rlike 'CBK0400045 GOODS NOT RECEIVED' then 'CBK0400045 GOODS NOT RECEIVED'
+           when a.dispute_reason rlike 'CBK0400020 DEBIT FOR DUPLICATE CHARGE' then 'CBK0400020 DEBIT FOR DUPLICATE CHARGE'
+           else a.dispute_reason
+     end dispute_reason
+    ,a.record_type
+    ,row_number() over(distribute by a.psp_reference sort by a.record_date desc) as rn
+  from ods_looklook_mongodb_adyen_dispute a
+  where pt=max_pt('ods_looklook_mongodb_adyen_dispute')
+
+)t3
+on t1.psp_reference=t3.psp_reference and t3.rn=1
+left join dwd_com_currency_transform cct
+on to_char(to_date(t1.booking_date,'yyyy-mm-dd hh:mi:ss'),'yyyymmdd')=cct.data_dt and t1.payment_currency=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where t1.pt=max_pt('ods_looklook_mongodb_adyen_transaction')
+and t1.record_type in ('Refunded')
+union all
+select
+   t1.trans_date as trans_date
+  ,t1.merchant_account as merchant_code
+  ,soi.business_unit_name
+  ,nvl(t2.site_id,0) as site_id
+  ,nvl(t2.site_name,'other') as site_name
+  ,soi.site_type_id
+  ,t1.breakdown_type as status
+  ,t1.payment_currency as currency_code
+  ,cast(t1.processing_currency_amount as decimal) as amount
+  ,cct.currency_transform
+  ,t1.payment_id
+  ,t2.order_id
+  ,'' as chargeback_code
+  ,t1.action_type as journal_type
+  ,t3.category as chargeback_description
+  ,'checkout' as payment_type
+  ,t2.if_swipe
+  ,cct.currency_transform_cny
+  ,t1.card_type
+  ,'' as chargeback_type
+  ,'' as resovle_status
+from @checkout_trans t1
+left join (select t2.site_id,t2.site_name,t2.unique_id as txn_id,t2.order_id,t2.if_swipe from dwd_mapping_txn_order_site t2 where  t2.pay_type='checkout' and t2.pt='${date}' group by t2.site_id,t2.site_name,t2.unique_id,t2.order_id,t2.if_swipe) t2
+on t1.reference=t2.txn_id
+left join @site_org_info soi
+on t2.site_id=soi.site_id and substring(t1.trans_date,1,6) = soi.date_month
+left join (
+  select
+     a.payment_reference
+    ,a.payment_method
+    ,a.category
+    ,a.status
+    ,row_number() over(distribute by a.payment_reference sort by a.received_on desc) as rn
+  from ods_looklook_mongodb_checkout_dispute_data a
+  where pt=max_pt('ods_looklook_mongodb_checkout_dispute_data')
+
+)t3
+on t1.reference=t3.payment_reference and t3.rn=1
+left join dwd_com_currency_transform cct
+on t1.trans_date=cct.data_dt and t1.payment_currency=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where  t1.breakdown_type rlike 'refunded'
+union all
+select
+   substring(t1.transactiontime,1,8) as trans_date
+  ,t1.accid
+  ,soi.business_unit_name
+  ,nvl(t2.site_id,0) as site_id
+  ,nvl(t2.site_name,'other') as site_name
+  ,soi.site_type_id
+  ,t1.status
+  ,t1.currency
+  ,-t1.amount
+  ,cct.currency_transform
+  ,t1.relatetransactionid
+  ,t2.order_id
+  ,t3.chargeback_code
+  ,t3.journal_type
+  ,t3.chargeback_description
+  ,'pingpong' as payment_type
+  ,t2.if_swipe
+  ,cct.currency_transform_cny
+  ,'' as card_type
+  ,'' as chargeback_type
+  ,'' as resovle_status
+from ods_looklook_mongodb_pingpong_transaction t1
+left join dwd_mapping_txn_order_site t2
+on t1.relatetransactionid=t2.txn_id and t2.pay_type='pingpong' and t2.pt='${date}'
+left join @site_org_info soi
+on t2.site_id=soi.site_id and substring(t1.transactiontime,1,6) = soi.date_month
+left join (
+  select
+     transactionid
+    ,reasonCode as chargeback_code
+    ,reasonDescription as chargeback_description
+    ,chargebackType as journal_type
+    ,row_number() over(distribute by transactionid sort by createDate desc) as rn
+  from ods_looklook_mongodb_pingpong_chargeback
+  where pt=max_pt('ods_looklook_mongodb_pingpong_chargeback')
+
+)t3
+on t1.relatetransactionid=t3.transactionid and t3.rn=1
+left join dwd_com_currency_transform cct
+on substring(t1.transactiontime,1,8)=cct.data_dt and t1.currency=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where t1.pt=max_pt('ods_looklook_mongodb_pingpong_transaction') and t1.paymenttype = 'REFUND' and t1.status = 'SUCCESS'
+union all
+select
+    to_char(a.detime,'yyyymmdd') as trans_date,
+    a.merchant_code,
+    soi.business_unit_name as business_unit_name,
+    a.site_id,
+    a.site_name,
+    soi.site_type_id as site_type_id,
+    a.transproperty,
+    a.currency_code,
+    a.demoney,
+    cct.currency_transform,
+    a.merchantno,
+    a.order_id,
+    b1.chargeback_id,
+    b1.port_status,
+    b1.remark,
+    'pacypay' as payment_type,
+    a.if_swipe,
+    cct.currency_transform_cny,
+    a.card_type
+    ,'' as chargeback_type
+    ,'' as resovle_status
+from (select * from @pacypay_order_info a where a.transproperty in ('部分退款','退款')) a
+left join (
+  select b1.transaction_id,regexp_replace(b1.remark,'[^\u0000-\u00FF]','') as remark,b1.port_status,b1.chargeback_id,row_number() over (partition by b1.transaction_id order by b1.chargeback_time desc) as rn
+  from ods_looklook_mongodb_pacypay_transaction  b1 where b1.pt = '${date}' and b1.port_status = 'refund'
+) b1
+on (a.merchantno = b1.transaction_id and b1.rn =1)
+left join dwd_com_currency_transform cct
+on to_char(a.detime,'yyyymmdd')=cct.data_dt and a.currency_code=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+left join @site_org_info soi
+on a.site_id=soi.site_id and to_char(a.detime,'yyyymm') = soi.date_month
+union all
+select
+    to_char(dateadd(format_shopify_date(a.refund_date),-8,'hh'),'yyyymmdd') as trans_date,
+    a.merchant_code,
+    soi.business_unit_name,
+    soi.site_id,
+    soi.site_name,
+    soi.site_type_id,
+    'refund' as status,
+    a.currency_code,
+    -a.refund_amount,
+    cct.currency_transform,
+    a.trans_id,
+    c.order_id,
+    '' as chargeback_id,
+    '' as port_status,
+    '' as reason,
+    'cardpay' as payment_type,
+    c.if_swipe,
+    cct.currency_transform_cny,
+    a.card_type,
+    '' as chargeback_type,
+    '' as resovle_status
+from @refund_info a
+left join dwd_mapping_txn_order_site c
+on (a.trans_id = c.txn_id and c.pay_type = 'cardpay' and c.pt = '${date}')
+left join @site_org_info soi
+on c.site_id=soi.site_id and to_char(dateadd(format_shopify_date(a.refund_date),-8,'hh'),'yyyymm') = soi.date_month
+left join dwd_com_currency_transform cct
+on to_char(dateadd(format_shopify_date(a.refund_date),-8,'hh'),'yyyymmdd')=cct.data_dt and a.currency_code=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where a.status = 'COMPLETED'
+union all
+select
+  replace(a.transaction_date,'-','') as trans_date,
+  a.merchant_code as merchant_code,
+  business_unit_name as business_unit_name,
+  a.site_id,
+  a.site_name,
+  soi.site_type_id as site_type_id,
+  a.transaction_type as status,
+  a.currency_code,
+  cast(a.transaction_amount as decimal) as charged_back_amount,
+  cct.currency_transform as currency_transform,
+  a.request_id as trans_id,
+  a.order_id,
+  '' as chargeback_code,
+  a.transaction_type as journal_type,
+  '' as chargeback_description,
+  'credorax' as payment_type,
+  a.if_swipe,
+  cct.currency_transform_cny,
+  a.card_type,
+  '' as chargeback_type,
+  '' as resovle_status
+from @credorax_refund a
+left join dwd_com_currency_transform cct
+on (a.currency_code = cct.currency_code and replace(a.transaction_date,'-','') = cct.data_dt and cct.pt = '${date}')
+left join @site_org_info soi
+on a.site_id=soi.site_id and substring(replace(a.transaction_date,'-',''),1,6) = soi.date_month
+union all
+select
+  a.trans_date as trans_date,
+  a.merchant_code as merchant_code,
+  soi.business_unit_name as business_unit_name,
+  a.site_id,
+  a.site_name,
+  soi.site_type_id as site_type_id,
+  a.transaction_type as status,
+  a.currency_code,
+  cast(a.transaction_amount as decimal) as charged_back_amount,
+  cct.currency_transform as currency_transform,
+  a.transaction_code as trans_id,
+  a.order_id,
+  '' as chargeback_code,
+  '' as journal_type,
+  ' ' as chargeback_description,
+  'xborder' as payment_type,
+  a.if_swipe,
+  cct.currency_transform_cny,
+  a.card_type,
+  '' as chargeback_type,
+  '' as resovle_status
+from @xborder_refund a
+left join dwd_com_currency_transform cct
+on (a.currency_code = cct.currency_code and a.trans_date = cct.data_dt and cct.pt = '${date}')
+left join @site_org_info soi
+on a.site_id=soi.site_id and substring(a.trans_date,1,6) = soi.date_month
+union all
+select
+  a.trans_date as trans_date,
+  a.merchant_code as merchant_code,
+  soi.business_unit_name as business_unit_name,
+  a.site_id,
+  a.site_name,
+  soi.site_type_id as site_type_id,
+  a.transaction_type as status,
+  a.currency_code,
+  cast(a.transaction_amount as decimal) as charged_back_amount,
+  cct.currency_transform as currency_transform,
+  a.transaction_code as trans_id,
+  a.order_id,
+  '' as chargeback_code,
+  '' as journal_type,
+  ' ' as chargeback_description,
+  'paidy' as payment_type,
+  a.if_swipe,
+  cct.currency_transform_cny,
+  a.card_type,
+  '' as chargeback_type,
+  '' as resovle_status
+from @paidy_refund a
+left join dwd_com_currency_transform cct
+on (a.currency_code = cct.currency_code and a.trans_date = cct.data_dt and cct.pt = '${date}')
+left join @site_org_info soi
+on a.site_id=soi.site_id and substring(a.trans_date,1,6) = soi.date_month
+union all
+select
+  replace(a.confirm_date,'-','') as trans_date,
+  a.merchant_code as merchant_code,
+  soi.business_unit_name as business_unit_name,
+  a.site_id,
+  a.site_name,
+  soi.site_type_id as site_type_id,
+  'refund' as status,
+  a.currency_code,
+  cast(a.refunds as decimal) as charged_back_amount,
+  cct.currency_transform as currency_transform,
+  a.order_number as trans_id,
+  a.order_id,
+  '' as chargeback_code,
+  '' as journal_type,
+  ' ' as chargeback_description,
+  'ebanx' as payment_type,
+  a.if_swipe,
+  cct.currency_transform_cny,
+  a.pay_method as card_type,
+  '' as chargeback_type,
+  '' as resovle_status
+from @ebanx_refund_order a
+left join dwd_com_currency_transform cct
+on (a.currency_code = cct.currency_code and replace(a.confirm_date,'-','') = cct.data_dt and cct.pt = '${date}')
+left join @site_org_info soi
+on a.site_id=soi.site_id and substring(replace(a.confirm_date,'-',''),1,6) = soi.date_month
+union all
+select
+  replace(substring(accounting_time,1,10),'-','') as trans_date,
+  a.terminal_number as merchant_code,
+  soi.business_unit_name as business_unit_name,
+  b.site_id,
+  b.site_name,
+  soi.site_type_id as site_type_id,
+  'refund' as status,
+  transaction_currency as currency_code,
+  cast(a.transaction_amount as decimal) as charged_back_amount,
+  cct.currency_transform as currency_transform,
+  a.account_order_code as trans_id,
+  b.order_id,
+  '' as chargeback_code,
+  '' as journal_type,
+  ' ' as chargeback_description,
+  'oceanpaycash' as payment_type,
+  b.if_swipe,
+  cct.currency_transform_cny,
+  a.cards as card_type,
+  '' as chargeback_type,
+  '' as resovle_status
+from ods_looklook_mongodb_oceanpaycash_transactions_detail a
+left join dwd_mapping_txn_order_site b
+on (a.account_order_code = b.txn_id and b.pt = '${date}' and b.pay_type = 'oceanpaycash')
+left join dwd_com_currency_transform cct
+on (a.transaction_currency = cct.currency_code and replace(substring(accounting_time,1,10),'-','') = cct.data_dt and cct.pt = '${date}')
+left join @site_org_info soi
+on b.site_id=soi.site_id and substring(replace(substring(accounting_time,1,10),'-',''),1,6) = soi.date_month
+where a.pt = '${date}' and a.transaction_type in ('退款','退款（全额）','退款（部分）')
+union all
+select
+  substring(a.transaction_time,1,8) as trans_date,
+  a.merchant_id as merchant_code,
+  soi.business_unit_name as business_unit_name,
+  b.site_id,
+  b.site_name,
+  soi.site_type_id as site_type_id,
+  'refund' as status,
+  transaction_currency as currency_code,
+  cast(-a.return_amount as decimal) as charged_back_amount,
+  cct.currency_transform as currency_transform,
+  case when a.origin_order_number = 'null' or a.origin_order_number is null then order_number else origin_order_number end as trans_id,
+  b.order_id,
+  '' as chargeback_code,
+  '' as journal_type,
+  ' ' as chargeback_description,
+  'goallpay' as payment_type,
+  b.if_swipe,
+  cct.currency_transform_cny,
+  '' as card_type,
+  '' as chargeback_type,
+  '' as resovle_status
+from ods_looklook_mongodb_goallpay_transcation a
+left join dwd_mapping_txn_order_site b
+on (case when a.origin_order_number = 'null' or a.origin_order_number is null then order_number else origin_order_number end = b.txn_id and b.pt = '${date}' and b.pay_type = 'goallpay')
+left join dwd_com_currency_transform cct
+on (a.transaction_currency = cct.currency_code and replace(substring(a.transaction_time,1,8),'-','') = cct.data_dt and cct.pt = '${date}')
+left join @site_org_info soi
+on b.site_id=soi.site_id and substring(replace(substring(a.transaction_time,1,8),'-',''),1,6) = soi.date_month
+where a.pt = '${date}' and a.transaction_type in ('REFD') and a.order_result= 'Success'
+union all
+select
+  a.trans_date,
+  a.merchant_code,
+  a.business_unit_name,
+  a.site_id,
+  a.site_name,
+  a.site_type_id,
+  a.status,
+  a.currency_code,
+  -a.refunds,
+  a.currency_transform,
+  a.payment_intent_id as transaction_code,
+  a.order_id,
+  a.chargeback_code,
+  a.journal_type,
+  a.refund_reason,
+  a.payment_type,
+  a.if_swipe,
+  a.currency_transform_cny,
+  a.card_type,
+  a.chargeback_type,
+  a.resovle_status
+from @airwallex_refunds a
+union all
+select
+  a.trans_date,
+  a.merchant_code,
+  a.business_unit_name,
+  a.site_id,
+  a.site_name,
+  a.site_type_id,
+  a.status,
+  a.currency_code,
+  -a.refunds,
+  a.currency_transform,
+  a.payment_intent_id as transaction_code,
+  a.order_id,
+  a.chargeback_code,
+  a.journal_type,
+  a.refund_reason,
+  a.payment_type,
+  a.if_swipe,
+  a.currency_transform_cny,
+  a.card_type,
+  a.chargeback_type,
+  a.resovle_status
+from @stripe_refunds a
+;
+
+@charge_back_reason_info:=
+select
+   t1.trans_date
+  ,t1.merchant_code
+  ,t1.business_unit_name
+  ,t1.site_id
+  ,t1.site_name
+  ,t1.site_type_id
+  ,t1.status
+  ,t1.currency_code
+  ,t1.amount
+  ,t1.amount*nvl(price.price_rate,1) as share_amount
+  ,t1.currency_transform
+  ,t1.transaction_code
+  ,t1.order_id
+  ,t1.chargeback_code
+  ,t1.journal_type
+  ,t1.chargeback_description
+  ,t1.payment_type
+  ,price.product_no as product_no
+  ,op.parent_reason
+  ,op.problem_reason
+  ,'' as tag
+  ,price.order_date as add_time
+  ,price.pre_price as share_price
+  ,null as order_price_usd
+  ,price.source_url
+  ,price.order_no
+  ,'' as create_time
+  ,'' as create_user_name
+  ,aoi.shipping_country_name
+  ,case when aoi.shipping_country_code is null or aoi.shipping_country_code = '' then 'OTHER' else aoi.shipping_country_code end as shipping_country_code
+  ,aoi.shipping_customer_email
+  ,ad.address
+  ,price.sku_id as order_goods_id
+  ,'' as audit_user_name
+  ,t1.if_swipe
+  ,t1.currency_transform_cny
+  ,t1.card_type
+  ,t1.chargeback_type
+  ,nvl(price.is_delivery,0) as is_delivery
+  ,t1.resovle_status
+  ,op.cancel_reason
+  ,price.order_id as order_id_opdc
+  ,t1.reasoncode
+from @charge_back_detail t1
+left join @mapping_erp_order eoi
+on t1.order_id=eoi.site_order_id and t1.site_id = eoi.site_id
+left join @goods_pre_price_oms price
+on eoi.erp_order_id = nvl(price.erp_order_id,price.order_id)
+left join @order_problem op
+on string(op.order_id)=nvl(price.erp_order_id,price.order_id) and op.sku_id = price.sku_id
+left join (select distinct aoi.order_id,aoi.site_id,aoi.shipping_country_name,aoi.shipping_country_code,aoi.shipping_customer_email from dwd_looklook_allsitetype_order_info aoi where 1=1 and aoi.pt = '${date}') aoi
+on (t1.order_id = aoi.order_id and t1.site_id = aoi.site_id)
+left join @erp_order_address ad
+on (eoi.erp_order_id = ad.order_id)
+;
+
+@refunds_reason_info:=
+select
+   t1.trans_date
+  ,t1.merchant_code
+  ,t1.business_unit_name
+  ,t1.site_id
+  ,t1.site_name
+  ,t1.site_type_id
+  ,t1.status
+  ,t1.currency_code
+  ,t1.amount
+  ,t1.amount*nvl(price.price_rate,1) as share_amount
+  ,t1.currency_transform
+  ,t1.transaction_code
+  ,t1.order_id
+  ,t1.chargeback_code
+  ,t1.journal_type
+  ,t1.chargeback_description
+  ,t1.payment_type
+  ,price.product_no as product_no
+  ,op.parent_reason
+  ,op.problem_reason
+  ,'' as tag
+  ,price.order_date as add_time
+  ,price.pre_price as share_price
+  ,null as order_price_usd
+  ,price.source_url
+  ,price.order_no
+  ,'' as create_time
+  ,'' as create_user_name
+  ,aoi.shipping_country_name
+  ,case when aoi.shipping_country_code is null or aoi.shipping_country_code = '' then 'OTHER' else aoi.shipping_country_code end as shipping_country_code
+  ,aoi.shipping_customer_email
+  ,ad.address
+  ,price.sku_id as order_goods_id
+  ,'' as audit_user_name
+  ,t1.if_swipe
+  ,t1.currency_transform_cny
+  ,t1.card_type
+  ,t1.chargeback_type
+  ,nvl(price.is_delivery,0) as is_delivery
+  ,t1.resovle_status
+  ,op.cancel_reason
+  ,price.order_id as order_id_opdc
+  ,'' as reasoncode
+from @refunds_detail t1
+left join @mapping_erp_order eoi
+on t1.order_id=eoi.site_order_id and t1.site_id = eoi.site_id
+left join @goods_pre_price_oms price
+on eoi.erp_order_id = nvl(price.erp_order_id,price.order_id)
+left join @order_problem op
+on string(op.order_id)=nvl(price.erp_order_id,price.order_id) and op.sku_id = price.sku_id
+left join (select distinct aoi.order_id,aoi.site_id,aoi.shipping_country_name,aoi.shipping_country_code,aoi.shipping_customer_email from dwd_looklook_allsitetype_order_info aoi where 1=1 and aoi.pt = '${date}') aoi
+on (t1.order_id = aoi.order_id and t1.site_id = aoi.site_id)
+left join @erp_order_address ad
+on (eoi.erp_order_id = ad.order_id)
+;
+@spu_reason:=
+select a.*,'charge_back' as chargeback_refunds_type
+from @charge_back_reason_info a
+union all
+select b.*,'refunds' as chargeback_refunds_type
+from @refunds_reason_info b
+;
+
+
+insert overwrite table app_looklook_fin_spu_chargeback_detail partition(pt = '${date}')
+select
+  a.trans_date,
+  a.merchant_code,
+  a.business_unit_name,
+  a.site_id,
+  a.site_name,
+  a.site_type_id,
+  a.status,
+  a.currency_code,
+  a.amount,
+  a.share_amount,
+  a.currency_transform,
+  a.transaction_code,
+  a.order_id,
+  a.chargeback_code,
+  a.journal_type,
+  a.chargeback_description,
+  a.payment_type,
+  a.product_no,
+  a.parent_reason,
+  a.problem_reason,
+  a.tag,
+  a.add_time,
+  a.share_price,
+  a.order_price_usd,
+  a.source_url,
+  a.order_no,
+  a.create_time,
+  a.create_user_name,
+  a.shipping_country_name,
+  a.shipping_customer_email,
+  a.address,
+  a.chargeback_refunds_type,
+  a.payment_reason_attr,
+  a.payment_reason_level1,
+  a.payment_reason_level2,
+  a.erp_reason_attr,
+  case when a.comprehensive_reason_level1 is null and b.err rlike 'forter' then 'forter风控' else a.comprehensive_reason_level1 end as comprehensive_reason_level1,
+  case when a.comprehensive_reason_level2 is null and b.err rlike 'forter' then 'forter风控' else a.comprehensive_reason_level2 end as comprehensive_reason_level2,
+  a.shipping_country_code,
+  a.erp_order_id,
+  a.order_goods_id,
+  a.audit_user_name,
+  a.if_swipe,
+  a.currency_transform_cny,
+  a.card_type,
+  a.chargeback_type,
+  a.is_delivery,
+  a.resovle_status,
+  a.cancel_reason,
+  a.order_id_opdc,
+  a.reasoncode
+from
+(
+    select
+        a.trans_date,
+        a.merchant_code,
+        a.business_unit_name,
+        a.site_id,
+        a.site_name,
+        a.site_type_id,
+        a.status,
+        a.currency_code,
+        a.amount,-- 拒付金额
+        a.share_amount,--均摊的拒付金额
+        a.currency_transform,
+        a.transaction_code,
+        a.order_id,
+        a.chargeback_code,
+        a.journal_type,
+        a.chargeback_description,
+        a.payment_type,
+        a.product_no,
+        a.parent_reason,
+        a.problem_reason,
+        a.tag,
+        a.add_time,
+        a.share_price,
+        a.order_price_usd,
+        a.source_url,
+        a.order_no,
+        a.create_time,
+        a.create_user_name,
+        a.shipping_country_name,
+        a.shipping_customer_email,
+        a.address,
+        a.chargeback_refunds_type,
+        b.reason_attr as payment_reason_attr,
+        b.reason_level_1 as payment_reason_level1,
+        b.reason_level_2 as payment_reason_level2,
+        case
+             when b.reason_attr is not null then b.reason_attr
+             when a.parent_reason rlike '采购因素|仓库因素|物流因素|质检因素|客户因素|产品因素'
+             then  '最初由澳鹏主动发起_技术&客服操作（退款）'
+             else '其他-最初由澳鹏主动发起_其他（退款）'
+        end as erp_reason_attr,
+        coalesce(a.parent_reason,b.reason_level_1,a.cancel_reason) as comprehensive_reason_level1,
+        coalesce(a.problem_reason,b.reason_level_2,a.cancel_reason) as comprehensive_reason_level2,
+        a.shipping_country_code,
+        epi.erp_order_id,
+        a.order_goods_id,
+        a.audit_user_name,
+        a.if_swipe,
+        a.currency_transform_cny,
+        a.card_type,
+        a.chargeback_type,
+        a.is_delivery,
+        a.resovle_status,
+        a.cancel_reason,
+        a.order_id_opdc,
+        a.reasoncode
+  from @spu_reason a
+  left join  (select distinct b.reason_attr,lower(b.reason_en) as reason_en,b.reason_level_1,b.reason_level_2,b.reason_type,b.chargeback_refunds_type from static_refunds_chargeback_reason_mapping b) b
+  on (replace(regexp_replace(lower(trim(a.chargeback_description)),'\n|\t|\r',''),' ','') = replace(regexp_replace(lower(trim(b.reason_en)),'\n|\t|\r',''),' ','') and lower(a.payment_type) = lower(b.reason_type) and a.chargeback_refunds_type = regexp_replace(b.chargeback_refunds_type,'\n|\t|\r','') and b.reason_type!='erp')
+  left join
+  (
+      select
+           site_order_id
+          ,site_id
+          ,wm_concat(',',erp_order_id) as erp_order_id
+      from dwd_mapping_erp_order_id
+      where pt=max_pt('dwd_mapping_erp_order_id')
+      group by
+          site_order_id
+         ,site_id
+  )epi
+  on a.order_id=epi.site_order_id and a.site_id=epi.site_id
+) a
+left join (
+select b.err,b.trade_no,row_number() over (partition by b.trade_no order by b.create_time desc) as rn
+from orderplus_HK.ods_cloud_orderplus_db_tb_order_payment b where b.err is not null and length(trim(b.err))>0 and b.pt = '${date}'
+) b
+on (a.transaction_code = b.trade_no and b.rn =1)
+where a.trans_date >= '20200101'
+;

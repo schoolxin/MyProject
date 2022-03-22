@@ -1,0 +1,5 @@
+select sum(t.gmv_amount_cny) as gmv_amount_cny,sum(t.cancel_order_gmv) as cancel_order_gmv,
+sum(t.cancel_order_market_cost_cny) as cancel_order_market_cost_cny,sum(t.gmv_amount_cny*t.logistics_cost_rate) as logistics_cost_cny
+from app_looklook_daily_commission_business_frozen t
+where t.mt = '202202' and t.data_dt between '20220201' and '20220215' and t.obj_type = 'site'
+;

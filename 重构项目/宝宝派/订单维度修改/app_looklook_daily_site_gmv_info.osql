@@ -1,0 +1,263 @@
+--name:app_looklook_daily_site_gmv_info
+--author:order
+--create time:2021-12-09 17:35
+--name:app_looklook_daily_site_gmv_info
+--author:order
+--create time:2021-11-01 11:32
+
+@mapping_erp_site_info:=
+select
+    t2.site_id,
+    t2.site_name,
+    t2.erp_site_id
+from
+(
+    select
+    t1.site_name,
+    t1.site_id,
+    t1.erp_site_id,
+    t1.status,
+    row_number() over (partition by t1.erp_site_id order by t1.status asc) as rn
+    from
+    (
+        select
+            a.site_name,
+            a.site_id,
+            case when b.site_type_id = 4 then a.cod_erp_site_id else a.erp_site_id end as erp_site_id,
+            b.status
+        from dwd_mapping_erp_site_id a
+        join ods_looklook_looklook_tb_site b
+        on (a.site_id = b.id and b.pt='${date}')
+        where a.pt='${date}'
+    ) t1
+) t2
+where t2.rn =1
+
+;
+--dengzz add 售卖系统销售额 start
+@site_sale_amount :=
+select
+  aoi.order_date as data_dt,
+  aoi.site_id,
+  aoi.site_name,
+  sum(aoi.total_amount*cct.currency_transform_cny) as total_amount,
+  count(distinct order_id) as order_cnt
+from dwd_looklook_allsitetype_order_info aoi
+left join dwd_com_currency_transform cct
+on  aoi.order_date=cct.data_dt and aoi.currency_code=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where aoi.pt='${date}' and aoi.site_type in ('shoplazza','spsite','Mshop','woocommerce','shopline') and aoi.financial_status = 'paid' and substring(replace(aoi.txn_at,'-',''),1,8)<'20211118'
+group by  aoi.order_date,aoi.site_id,aoi.site_name
+union all
+select
+  substring(replace(aoi.txn_at,'-',''),1,8) as data_dt,
+  aoi.site_id,
+  aoi.site_name,
+  sum(aoi.total_amount*cct.currency_transform_cny) as total_amount,
+  count(distinct order_id) as order_cnt
+from dwd_looklook_allsitetype_order_info aoi
+left join dwd_com_currency_transform cct
+on  aoi.order_date=cct.data_dt and aoi.currency_code=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where aoi.pt='${date}' and aoi.site_type in ('shoplazza','spsite','Mshop','woocommerce','shopline') and aoi.financial_status = 'paid' and substring(replace(aoi.txn_at,'-',''),1,8)>='20211118'
+group by  substring(replace(aoi.txn_at,'-',''),1,8),aoi.site_id,aoi.site_name
+
+-- 云站和shopify使用售卖系统后台的USD金额  因为erp的订单金额取的USD
+union all
+select
+  to_char(aoi.order_date,'yyyymmdd') as data_dt,
+  string(aoi.site_id) as site_id,
+  aoi.site_name,
+  sum(aoi.total_price_usd*cct.currency_transform_cny) as total_amount,
+  count(distinct order_id) as order_cnt
+from dwd_looklook_shopify_order_info aoi
+left join dwd_com_currency_transform cct
+on  to_char(aoi.order_date,'yyyymmdd')=cct.data_dt and 'USD'= cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where aoi.pt='${date}' and lower(aoi.financial_status) in ('paid','partially_refunded','refunded') and substring(replace(aoi.txn_at,'-',''),1,8)<'20211118'
+group by  to_char(aoi.order_date,'yyyymmdd'),aoi.site_id,aoi.site_name
+union all
+select
+  substring(replace(aoi.txn_at,'-',''),1,8) as data_dt,
+  string(aoi.site_id) as site_id,
+  aoi.site_name,
+  sum(aoi.total_price_usd*cct.currency_transform_cny) as total_amount,
+  count(distinct order_id) as order_cnt
+from dwd_looklook_shopify_order_info aoi
+left join dwd_com_currency_transform cct
+on  to_char(aoi.order_date,'yyyymmdd')=cct.data_dt and 'USD'= cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where aoi.pt='${date}' and lower(aoi.financial_status) in ('paid','partially_refunded','refunded') and substring(replace(aoi.txn_at,'-',''),1,8)>='20211118'
+group by  substring(replace(aoi.txn_at,'-',''),1,8),aoi.site_id,aoi.site_name
+union all
+select
+  to_char(aoi.order_date,'yyyymmdd') as data_dt,
+  string(aoi.site_id) as site_id,
+  aoi.site_name,
+  sum(aoi.total_amount_usd*cct.currency_transform_cny) as total_amount,
+  count(distinct aoi.id) as order_cnt
+from dwd_looklook_cloud_order_info aoi
+left join dwd_com_currency_transform cct
+on  to_char(aoi.order_date,'yyyymmdd')=cct.data_dt and 'USD'= cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where aoi.pt='${date}' and lower(aoi.payment_status) in ('paid','partially_refunded','refunded') and aoi.special_sign=0 and substring(replace(aoi.txn_at,'-',''),1,8)<'20211118'-- 只统计非刷单的数据
+group by  to_char(aoi.order_date,'yyyymmdd'),aoi.site_id,aoi.site_name
+union all
+select
+  substring(replace(aoi.txn_at,'-',''),1,8) as data_dt,
+  string(aoi.site_id) as site_id,
+  aoi.site_name,
+  sum(aoi.total_amount_usd*cct.currency_transform_cny) as total_amount,
+  count(distinct aoi.id) as order_cnt
+from dwd_looklook_cloud_order_info aoi
+left join dwd_com_currency_transform cct
+on  to_char(aoi.order_date,'yyyymmdd')=cct.data_dt and 'USD'= cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where aoi.pt='${date}' and lower(aoi.payment_status) in ('paid','partially_refunded','refunded') and aoi.special_sign=0 and substring(replace(aoi.txn_at,'-',''),1,8)>='20211118' -- 只统计非刷单的数据
+group by  substring(replace(aoi.txn_at,'-',''),1,8),aoi.site_id,aoi.site_name
+;
+
+-- opshop  aliexpress Amazon 以及单页站 收入
+-- 亚马逊拆站
+@spa_site_info:=
+-- SPA 站
+select ds.site_id,ds.ops_site_id from opdc.dim_site  ds where ds.site_type = 'SPA单页站' and ds.ops_site_id is not null
+union all
+-- 亚马逊
+select ds.site_id,ds.ops_site_id from opdc.dim_site  ds where ds.site_type = 'amazon' and ds.ops_site_id is not null
+union all
+--shopee
+select ds.site_id,ds.ops_site_id from opdc.dim_site  ds where ds.site_type = 'shopee' and ds.ops_site_id is not null
+union all
+--aliexpress myopshop
+select ds.site_id,ds.ops_site_id from opdc.dim_site  ds where ds.site_id in (519,10) and ds.ops_site_id is not null
+
+;
+
+@amazon_site:=
+select a.erp_site_id
+from ods_looklook_looklook_tb_site a where a.pt = '${date}' and a.site_type_id in ('6','7')
+union all
+select 519 as erp_site_id
+union all
+select 10 as erp_site_id
+;
+
+@erp_spa_sale_amount :=
+select
+   to_char(osp.addtime,'yyyymmdd') as data_dt
+  ,ssi.ops_site_id as site_id
+  ,soi.site_name
+  ,soi.site_type_id
+--  ,sum(osp.order_amt*cct.currency_transform) as total_amount_usd
+  ,sum(osp.order_amt*cct.currency_transform_cny) as total_amount
+  ,count(distinct osp.order_id) as order_cnt
+from
+(
+  select osp.addtime,osp.currency_name as currency_code ,osp.order_amt,osp.order_id
+  from opdc.dwd_order_sales_process osp
+  where osp.change_type = '下单' and osp.order_amt>0
+  group by osp.addtime,osp.currency_name,osp.order_amt,osp.order_id
+  union all
+  select osp.addtime,osp.currency_name as currency_code ,osp.order_amt,osp.order_id
+  from popopiedc.dwd_order_sales_process osp
+  where osp.change_type = '下单' and osp.order_amt>0
+  group by osp.addtime,osp.currency_name,osp.order_amt,osp.order_id
+) osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+  union all
+  select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+inner join @spa_site_info  ssi
+on (ooa.site_id = ssi.site_id)
+left join dwd_com_site_org_info soi
+on ssi.ops_site_id=soi.site_id and soi.pt=max_pt('dwd_com_site_org_info')
+left join dwd_com_currency_transform cct
+on to_char(osp.addtime,'yyyymmdd')=cct.data_dt and cct.currency_code= osp.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where to_char(osp.addtime,'yyyymmdd')>='20211101'
+group by
+   to_char(osp.addtime,'yyyymmdd')
+  ,ssi.ops_site_id
+  ,soi.site_type_id
+  ,soi.site_name
+union all
+-- 为了不影响历史数据 先这样union 在一起 待后续 新系统稳定后剔除下面代码
+select
+    to_char(eoo.add_time,'yyyymmdd') as data_dt
+   ,bigint(esi.site_id) as site_id
+   ,esi.site_name
+   ,soi.site_type_id
+   ,sum((eoo.order_price - eoo.discount_price)*cct.currency_transform_cny) as total_amount
+   ,count(distinct eoo.id) as order_cnt
+from @mapping_erp_site_info esi
+inner join ods_erp_erp_order_order eoo
+on esi.erp_site_id=eoo.site_id and eoo.pt='${date}'
+left join dwd_com_currency_transform cct
+on to_char(add_time,'yyyymmdd')=cct.data_dt and cct.currency_code='USD' and cct.pt=max_pt('dwd_com_currency_transform')
+left join ods_erp_erp_sys_site ess
+on eoo.site_id=ess.site_id and ess.pt=max_pt('ods_erp_erp_sys_site')
+left join dwd_com_site_org_info soi
+on esi.site_id=soi.site_id and soi.pt=max_pt('dwd_com_site_org_info')
+where 1=1
+and (
+    eoo.site_id in (select a.erp_site_id from @amazon_site a) and esi.site_id !=2444
+ or ess.site_type in (8)
+)
+and eoo.pay_time is not null and to_char(eoo.add_time,'yyyymmdd')<'20211101'
+group by
+    esi.site_id
+   ,esi.site_name
+   ,to_char(eoo.add_time,'yyyymmdd')
+   ,soi.site_type_id
+;
+;
+
+@sale_amount :=
+select
+ t.data_dt,
+ t.site_id,
+ t.site_name,
+ t.total_amount,
+ t.site_type_id,
+ t.platform_fees,
+ t.order_cnt,
+ soi.business_unit_name
+from
+(
+  select
+      nvl(sa.site_id,ssa.site_id) as site_id,
+      nvl(sa.site_name,ssa.site_name) as site_name,
+      nvl(sa.data_dt,ssa.data_dt) as data_dt,
+      nvl(soi.site_type_id,ssa.site_type_id) as  site_type_id,
+      case
+          when nvl(soi.site_type_id,ssa.site_type_id) =4 then ssa.total_amount
+          else nvl(sa.total_amount,ssa.total_amount)
+      end as total_amount,
+      case
+          when nvl(soi.site_type_id,ssa.site_type_id) =4 then ssa.order_cnt
+          else nvl(sa.order_cnt,ssa.order_cnt)
+      end as order_cnt,
+      case
+          when nvl(soi.site_type_id,ssa.site_type_id) in(1,5) then nvl(sa.total_amount,ssa.total_amount)*0.06
+          when nvl(soi.site_type_id,ssa.site_type_id) in(4) then ssa.total_amount*0.06
+          when nvl(soi.site_type_id,ssa.site_type_id) in(2,3) then nvl(sa.total_amount,ssa.total_amount)*0.04
+      end as platform_fees
+  from @site_sale_amount sa
+  left join dwd_com_site_org_info soi
+  on soi.site_id=sa.site_id and soi.pt=max_pt('dwd_com_site_org_info')
+  full join @erp_spa_sale_amount ssa
+  on sa.site_id=ssa.site_id and sa.data_dt=ssa.data_dt
+  where nvl(sa.data_dt,ssa.data_dt)<='${date}'
+) t
+left join dwd_com_site_org_info soi
+on soi.site_id=t.site_id and soi.pt=max_pt('dwd_com_site_org_info')
+;
+
+insert overwrite table app_looklook_daily_site_gmv_info partition(pt='${date}')
+select
+  t.data_dt,
+  bigint(t.site_id) as site_id,
+  t.site_name,
+  t.total_amount,
+  t.site_type_id,
+  t.platform_fees,
+  t.order_cnt,
+  t.business_unit_name
+from @sale_amount t
+;

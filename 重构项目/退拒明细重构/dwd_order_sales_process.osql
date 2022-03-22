@@ -1,0 +1,84 @@
+insert overwrite table popopiedc.dwd_order_sales_process
+select o.*, 'oms' as system_type
+	, if(y.name is null, 1, 0) as abnormal_cate_type --   1.正常  0.异常
+	, e.order_ct
+	, e.site_id
+	, c.pay_type
+	, if(a.orderid is not null, 1, 0) as is_fraud -- (1表示是诈骗  0不是)
+--	, null  as erp_order_id
+	, k.id as erp_order_id
+	, cast(b.order_amt as decimal(18, 4)) as order_amt
+	, getdate() as dwd_updated_tm
+	, y.name as abnormal_reason_name
+	, g.normal_date as normal_date
+	,cast((b.pay_amt) as decimal(18,4)) as pay_amt    --支付金额
+from  (select 	* from popopiedc.dwd_oms_order_sales_process)  o
+left outer join  (select order_id,order_ct,site_id from popopiedc.dw_oms_order_order group by order_id,order_ct,site_id)   e
+on e.order_id = o.order_id
+left outer join (
+	select id as orderid
+	from popopiedc.ods_oms_order_order
+	where cancel_status > 0
+		and abnormal_type_root_id = 2
+	group by id
+) a
+on a.orderid = o.order_id
+left outer join (
+	select n.id as order_id, n.order_amt,n.pay_amt
+	from popopiedc.ods_oms_order_order n
+) b
+on b.order_id = o.order_id
+left outer join (
+	select order_id, pay_type
+	from popopiedc.dw_oms_order_order
+	group by order_id,
+		pay_type
+) c
+on c.order_id = o.order_id
+
+left outer join (
+	select id, normal_date
+	from popopiedc.ods_oms_order_order
+) g
+on g.id = o.order_id
+left outer join (
+	select order_id, order_no, name
+	from (
+		select id as order_id, order_no, abnormal_type_root_id
+		from popopiedc.ods_oms_order_order oo
+		where oo.is_delete = 0
+			and oo.order_status > 0
+			and oo.order_status in (1)
+			and oo.cancel_status in (0, 1)
+	) z
+	left outer join (
+		select id, name
+		from popopiedc.ods_oms_order_abnormal_reason
+	) x
+	on x.id = z.abnormal_type_root_id
+	group by order_id,
+		order_no,
+		name
+) y
+on y.order_id = o.order_id
+left join
+(
+  select a.id,a.omsorderid from op_jxl.ods_erp_order_order a where nvl(a.omsorderid,0)!=0 group by a.id,a.omsorderid
+) k
+on (o.order_id = k.omsorderid)
+
+-- where e.site_id not in (
+-- 24732
+-- ,31962
+-- ,32420
+-- ,41236
+-- ,41240
+-- ,41275
+-- ,41370
+-- ,41421
+-- ,10
+-- ,90)
+
+;
+
+------------------------------------------------以下为测试-----------------------------------------

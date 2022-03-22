@@ -1,0 +1,199 @@
+--name:新均摊逻辑
+--author:order
+--create time:2022-01-26 15:26
+--name:app_looklook_fin_spu_chargeback_detail
+--author:order
+--create time:2022-01-26 09:38
+-- 均摊
+@order_goods_sale_info_purchase:=
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+  ,sum(abs(osp.good_price_currency)*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as good_price_currency
+  ,sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,to_char(osp.addtime,'yyyymmdd') as order_date
+  ,nvl(osp.order_id,osp.erp_order_id) as erp_order_id
+  ,to_date(osp.paytime) as pay_date
+from (
+  select osp.order_no,osp.order_id,osp.order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from opdc.dwd_order_sales_process osp
+  union all
+  select osp.order_no,osp.order_id,osp.order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from popopiedc.dwd_order_sales_process osp
+  where osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+) osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+  union all
+  select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where 1=1 and (osp.change_type in ('下单') or (osp.change_details_type = '替换上' and osp.change_type = '换货') or (osp.change_details_type = '添加补发商品' and osp.change_type = '补发'))
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.currency_name
+  ,nvl(osp.sku_erp_id,osp.sku_id)
+  ,to_char(osp.addtime,'yyyymmdd')
+  ,osp.erp_order_id
+  ,to_date(osp.paytime)
+;
+@order_goods_sale_info_cancel:=
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+  ,abs(sum(osp.good_price_currency*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty))) as good_price_currency
+  ,abs(sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty))) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,to_char(osp.addtime,'yyyymmdd') as order_date
+  ,nvl(osp.order_id,osp.erp_order_id) as erp_order_id
+  ,to_date(osp.paytime) as pay_date
+from (
+  select osp.order_no,osp.order_id,osp.order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from opdc.dwd_order_sales_process osp
+  union all
+  select osp.order_no,osp.order_id,osp.order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from popopiedc.dwd_order_sales_process osp
+  where osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+) osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+  union all
+  select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where 1=1 and (change_details_type = '原单商品取消' and change_type = '取消')
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.currency_name
+  ,nvl(osp.sku_erp_id,osp.sku_id)
+  ,to_char(osp.addtime,'yyyymmdd')
+  ,osp.erp_order_id
+  ,to_date(osp.paytime)
+;
+
+
+-- 剔除取消的商品 如果剔除后的数量为负数则置为0
+
+@order_goods_sale_info:=
+select
+   sip.site_id
+  ,sip.order_no
+  ,sip.order_id
+  ,sip.order_amt
+  ,sip.sku_id
+  ,sip.good_price_currency
+  ,sip.current_sku_qty
+  ,sip.currency_name
+  ,sip.order_date
+  ,sip.erp_order_id
+  ,sip.pay_date
+  ,nvl(sic.good_price_currency,0) as good_price_currency_cancel
+  ,nvl(sic.current_sku_qty,0) as current_sku_qty_cancel
+  ,if(sip.good_price_currency-nvl(sic.good_price_currency,0)<0,0,sip.good_price_currency-nvl(sic.good_price_currency,0)) as good_price_currency_final
+  ,if(sip.current_sku_qty-nvl(sic.current_sku_qty,0)<0,0,sip.current_sku_qty-nvl(sic.current_sku_qty,0)) as current_sku_qty_final
+from @order_goods_sale_info_purchase sip
+left join @order_goods_sale_info_cancel sic
+on (sip.order_id = sic.order_id and sip.site_id = sip.site_id and sip.sku_id = sic.sku_id)
+where to_char(sip.pay_date,'yyyymmdd') >= '20190101'
+;
+@weight_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.good_price_currency_final -- 订单物品总金额
+    ,t.current_sku_qty_final -- 订单物品总数量
+    ,t.currency_name
+    ,t.order_date
+    ,t.pay_date
+    ,t.erp_order_id
+    ,sum(t.current_sku_qty_final) over (partition by t.order_id ) as sum_counts
+    ,sum(t.good_price_currency_final) over (partition by t.order_id ) as sum_amount
+from
+(
+  select
+     gsi.site_id
+    ,gsi.order_no
+    ,gsi.order_id
+    ,gsi.order_amt
+    ,gsi.sku_id
+    ,gsi.good_price_currency -- 订单物品总金额
+    ,gsi.current_sku_qty -- 订单物品总数量
+    ,gsi.currency_name
+    ,gsi.order_date
+    ,gsi.erp_order_id
+    ,gsi.pay_date
+    ,gsi.good_price_currency_final
+    ,gsi.current_sku_qty_final
+  from @order_goods_sale_info gsi
+) t
+;
+--- 只要 关联到锁库 并且 关联到库存表  订单日期在入库时间之后 就认为是库存
+--- 使用sku 平均发货时效作为订单明细表sku的发货时间  因为订单明细表中的没有物品维度 并且一个sku只有一条记录 即使该sku买了多个也只有一条数据 没法做到每一个物品找到对应的发货时间
+-- dw_logistics_package_shipments 发货表
+@price_rate_oms:=
+select
+     wp.site_id
+    ,wp.order_no
+    ,wp.order_id
+    ,wp.order_amt
+    ,wp.sku_id
+    ,wp.good_price_currency_final -- 订单物品总金额
+    ,wp.current_sku_qty_final -- 订单物品总数量
+    ,wp.currency_name
+    ,wp.sum_counts
+    ,wp.sum_amount
+    ,case when wp.sum_amount<> 0 then wp.good_price_currency_final/wp.sum_amount
+          when wp.sum_counts= 0 then 0
+          else current_sku_qty_final/sum_counts
+     end as price_rate
+    ,wp.order_date
+    ,wp.pay_date
+    ,wp.erp_order_id
+from @weight_price_oms wp
+;
+
+
+@goods_pre_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.good_price_currency_final -- 订单物品总金额
+    ,t.current_sku_qty_final -- 订单物品总数量
+    ,t.currency_name
+    ,t.sum_counts
+    ,t.sum_amount
+    ,t.price_rate
+    ,t.order_amt*t.price_rate as pre_price
+    ,t.order_date
+    ,t.erp_order_id
+from @price_rate_oms t
+;
+
+select * from @goods_pre_price_oms a where a.pre_price<0;

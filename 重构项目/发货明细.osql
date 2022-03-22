@@ -1,0 +1,203 @@
+--name:发货明细
+--author:order
+--create time:2021-11-09 16:50
+
+@mapping_erp_site_info_oms:=
+select  a.site_name,
+        a.site_id,
+        case when b.site_type_id = 4 then a.cod_erp_site_id else a.erp_site_id end as erp_site_id
+from dwd_mapping_erp_site_id a
+join ods_looklook_looklook_tb_site b
+on (a.site_id = b.id and b.pt='${date}')
+where a.pt='${date}';
+
+--select * from @mapping_erp_site_info_oms t where t.site_id = '18980';
+
+@site_delivery_info_oms:=
+select
+   lps.order_id
+  ,to_char(lps.deliverytime,'yyyymmdd') as delivery_date
+  ,lps.expressno
+  ,lps.skuid as skuid
+  ,lps.actualfee as logistics_cost_cny
+  ,lps.goodscount as sku_count
+from opdc.dw_logistics_package_shipments lps
+where to_char(lps.deliverytime,'yyyymmdd')>='20211101'
+and lps.deliverystatus != '清关退回'
+group by
+   lps.order_id
+  ,to_char(lps.deliverytime,'yyyymmdd')
+  ,lps.expressno
+  ,lps.skuid
+  ,lps.actualfee
+  ,lps.goodscount;
+
+--物流费用
+@delivery_logistics_fees_info_oms:=
+select
+  sdi.order_id
+ ,sdi.delivery_date
+ ,sdi.expressno
+ ,sdi.logistics_cost_cny
+from @site_delivery_info_oms sdi
+group by
+  sdi.order_id
+ ,sdi.delivery_date
+ ,sdi.expressno
+ ,sdi.logistics_cost_cny
+;
+
+@order_goods_sale_info:=
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.sku_id
+  ,osp.sku_erp_id
+  ,osp.spu_id
+  ,osp.spu_erp_id
+  ,osp.spu_no
+  ,sum(osp.good_price_currency*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as good_price_currency -- 订单物品总金额
+  ,sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,'下单' as operate_type
+  ,to_char(osp.addtime,'yyyymmdd') as order_date
+  ,osp.erp_order_id
+  ,to_date(osp.paytime) as pay_date
+from opdc.dwd_order_sales_process osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where to_char(osp.addtime,'yyyymmdd')>='20211101' and osp.change_type = '下单'
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.currency_name
+  ,osp.sku_id
+  ,osp.sku_erp_id
+  ,osp.spu_id
+  ,osp.spu_erp_id
+  ,osp.spu_no
+  ,to_char(osp.addtime,'yyyymmdd')
+  ,osp.erp_order_id
+  ,to_date(osp.paytime)
+;
+
+@weight_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.sku_erp_id
+    ,t.spu_id
+    ,t.spu_erp_id
+    ,t.spu_no
+    ,t.good_price_currency -- 订单物品总金额
+    ,t.current_sku_qty -- 订单物品总数量
+    ,t.currency_name
+    ,t.operate_type
+    ,t.order_date
+    ,t.pay_date
+    ,t.erp_order_id
+    ,sum(if(t.operate_type = '取消',0,t.current_sku_qty)) over (partition by t.order_id ) as sum_counts
+    ,sum(if(t.operate_type = '取消',0,t.good_price_currency)) over (partition by t.order_id ) as sum_amount
+from
+(
+  select
+     gsi.site_id
+    ,gsi.order_no
+    ,gsi.order_id
+    ,gsi.order_amt
+    ,gsi.sku_id
+    ,gsi.sku_erp_id
+    ,gsi.spu_id
+    ,gsi.spu_erp_id
+    ,gsi.spu_no
+    ,gsi.good_price_currency -- 订单物品总金额
+    ,gsi.current_sku_qty -- 订单物品总数量
+    ,gsi.currency_name
+    ,gsi.operate_type
+    ,gsi.order_date
+    ,gsi.erp_order_id
+    ,gsi.pay_date
+  from @order_goods_sale_info gsi
+) t
+;
+--- 只要 关联到锁库 并且 关联到库存表  订单日期在入库时间之后 就认为是库存
+--- 使用sku 平均发货时效作为订单明细表sku的发货时间  因为订单明细表中的没有物品维度 并且一个sku只有一条记录 即使该sku买了多个也只有一条数据 没法做到每一个物品找到对应的发货时间
+-- dw_logistics_package_shipments 发货表
+@price_rate_oms:=
+select
+     wp.site_id
+    ,wp.order_no
+    ,wp.order_id
+    ,wp.order_amt
+    ,wp.sku_id
+    ,wp.sku_erp_id
+    ,wp.spu_id
+    ,wp.spu_erp_id
+    ,wp.spu_no
+    ,wp.good_price_currency -- 订单物品总金额
+    ,wp.current_sku_qty -- 订单物品总数量
+    ,wp.currency_name
+    ,wp.operate_type
+    ,wp.sum_counts
+    ,wp.sum_amount
+    ,case when wp.sum_amount<> 0 then wp.good_price_currency/wp.sum_amount
+          when wp.sum_counts= 0 then 0
+          else current_sku_qty/sum_counts
+     end as price_rate
+    ,wp.order_date
+    ,wp.pay_date
+    ,wp.erp_order_id
+from @weight_price_oms wp
+;
+
+
+@goods_pre_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.spu_id
+    ,t.spu_no
+    ,t.good_price_currency -- 订单物品总金额
+    ,t.current_sku_qty -- 订单物品总数量
+    ,t.currency_name
+    ,t.operate_type
+    ,t.sum_counts
+    ,t.sum_amount
+    ,t.price_rate
+    ,t.order_amt*t.price_rate as pre_price
+    ,t.order_date
+    ,t.erp_order_id
+    ,t.sku_erp_id
+from @price_rate_oms t
+;
+
+select
+  sdio.delivery_date
+ ,sdio.order_id
+ ,sdio.skuid
+ ,sdio.expressno
+ ,sdio.sku_count
+ ,gpp.pre_price
+ ,gpp.currency_name
+ ,gpp.order_amt
+ ,gpp.price_rate
+ ,gpp.good_price_currency
+ ,gpp.current_sku_qty
+ ,gpp.site_id
+from @site_delivery_info_oms sdio
+inner join @goods_pre_price_oms gpp
+on (sdio.order_id = gpp.erp_order_id and sdio.skuid = gpp.sku_erp_id)
+where sdio.delivery_date = '20211108' and gpp.site_id = '36754';
+;

@@ -1,0 +1,113 @@
+--name:dws_product_clear_tag_info
+--author:order
+--create time:2021-11-17 13:44
+@erp_sku_clear_tag_pre:=
+select
+    t1.spu_id
+   ,t1.sku_id
+   ,t1.product_spu
+   ,t1.start_clear_time
+   ,t1.end_clear_time
+   ,t1.sys_source
+from
+(
+    select
+      t.*,
+      row_number() over (partition by t.sku_id order by t.priority_level asc) as rn
+    from
+    (
+        select
+         distinct
+         a.spu_id,
+         a.sku_id,
+         b.old_no as product_spu,
+         to_char(a.start_clear_time,'yyyymmddhhmiss') as start_clear_time,
+         if(to_char(nvl(a.end_clear_time,getdate()),'yyyymmddhhmiss')<='20211111235959',to_char(nvl(a.end_clear_time,getdate()),'yyyymmddhhmiss'),'20211111235959') as end_clear_time,  --为了跟新数据衔接
+         'erp' as sys_source,
+         0 as priority_level
+      from ods_erp_erp_stock_clear_stock a  -- erp未同步清仓数据 只同步了折扣信息 因此 需要下面从折扣表判断是否清仓
+      inner join ods_erp_erp_product_spu b
+      on (a.spu_id = b.id and b.pt = '${date}')
+      where a.pt = '${date}' and to_char(a.start_clear_time,'yyyymmddhhmiss')<='20211111235959'
+      union all
+      select
+         distinct
+          b.id as spu_id
+         ,c.id as sku_id
+         ,b.old_no as oldno
+         ,to_char(a.starttime,'yyyymmddhhmiss') as start_time
+         ,if(to_char(nvl(c.endtime,getdate()),'yyyymmddhhmiss')<='20211111235959',to_char(nvl(c.endtime,getdate()),'yyyymmddhhmiss'),'20211111235959') as end_time  --为了跟新数据衔接
+         ,'erp' as sys_source
+         ,1 as priority_level
+      from ods_erp_erp_product_spudiscount a
+      inner join ods_erp_erp_product_spu b
+      on (a.oldno = b.old_no and b.pt = '${date}')
+      inner join ods_erp_erp_product_sku c
+      on (b.id = c.spu_id and c.pt = '${date}')
+      where a.pt = '${date}' and to_char(a.starttime,'yyyymmddhhmiss')<='20211111235959'
+    ) t
+) t1
+where t1.rn = 1
+;
+
+
+
+@sku_clear_tag:=
+select
+    string(t.spu_id) as spu_id
+   ,string(t.sku_id) as sku_id
+   ,t.product_spu
+   ,if(end_clear_time_max is null,t.start_clear_time,if(t.start_clear_time>end_clear_time_max,t.start_clear_time,to_char(bigint(end_clear_time_max+1)))) as start_clear_time
+   ,t.end_clear_time
+   ,t.start_clear_time as start_clear_time_org
+   ,t.sys_source
+from
+(
+  select
+    a.*,
+    max(a.end_clear_time) over (partition by a.sku_id order by a.start_clear_time rows between unbounded preceding and 1 preceding) as end_clear_time_max
+  from @erp_sku_clear_tag_pre a
+) t
+union all
+select
+     distinct
+     tt.pms_spu_id as spu_id
+    ,ds.pms_sku_id as sku_id
+    ,tt.product_no as product_spu
+    ,concat(tt.pt,'000000') as start_clear_time
+    ,if(tt.discount_state=2,concat(tt.pt,'000000'),concat(tt.pt,'235959')) as end_clear_time
+    ,concat(tt.pt,'235959')  as start_clear_time_org
+    ,'lms' as sys_source
+from opdc.dim_spu_price tt
+inner join opdc.dim_sku ds
+on (tt.product_no = ds.product_no)
+where tt.pt<='${date}' and tt.discount_state!=0
+-- 宝宝派
+union all
+select
+     distinct
+     tt.pms_spu_id as spu_id
+    ,ds.pms_sku_id as sku_id
+    ,tt.product_no as product_spu
+    ,concat(tt.pt,'000000') as start_clear_time
+    ,if(tt.discount_state=2,concat(tt.pt,'000000'),concat(tt.pt,'235959')) as end_clear_time
+    ,concat(tt.pt,'235959')  as start_clear_time_org
+    ,'lms' as sys_source
+from popopiedc.dim_spu_price tt
+inner join popopiedc.dim_sku ds
+on (tt.product_no = ds.product_no)
+where tt.pt<='${date}' and tt.discount_state!=0
+;
+
+
+insert overwrite table dws_product_clear_tag_info partition (pt ='${date}')
+select
+    ct.spu_id
+   ,ct.sku_id
+   ,ct.product_spu
+   ,ct.start_clear_time
+   ,ct.end_clear_time
+   ,ct.start_clear_time_org
+   ,ct.sys_source
+from @sku_clear_tag ct
+;

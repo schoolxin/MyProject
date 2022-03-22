@@ -1,0 +1,91 @@
+--name:app_looklook_erp_every_day_purchasecost_new
+--author:order
+--create time:2021-11-09 19:37
+
+--select * from @product_sku_discount_info v where v.sku_id = '8564598';
+@discount_sku_info:=
+select
+  t.pms_spu_id as spu_id,t.product_no as oldno,t.pms_sku_id as sku_id,t.start_time,t.end_time,t.discount_info
+from dws_product_discount_info t
+where t.pt = '${date}'
+;
+
+
+@order_info:=
+select
+  to_char(osp.paytime,'yyyymmdd') as pay_date,
+  osp.spu_erp_id,
+  osp.spu_no,
+  osp.spu_id,
+  osp.system_type,
+  osp.order_id,
+  osp.order_no,
+  ds.avg_purchase_price,-- 平均采购价
+  ds.supply_price, -- 供货单价
+  ds.purchase_guide_max_price,--采购指导价最高
+  ds.purchase_guide_min_price,--采购指导价最低
+  ds.product_no,
+  ds.pms_spu_id,
+  ds.lms_pd_id,
+  osp.current_sku_qty,
+  osp.sales_qty,
+  ooa.site_id,
+  osp.sku_erp_id,
+  nvl(coalesce(ds.avg_purchase_price,ds.supply_price,purchase_guide_max_price,purchase_guide_min_price),0) as purchase_price,
+  nvl(dsi.discount_info,1) as discount_info
+from opdc.dwd_order_sales_process osp
+inner join (
+      select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+left join opdc.dim_spu ds
+on (osp.spu_no = ds.product_no)
+left join @discount_sku_info dsi
+on osp.sku_erp_id = dsi.sku_id and to_char(osp.paytime,'yyyymmddhhmiss')>=nvl(dsi.start_time,'99991231235959') and to_char(osp.paytime,'yyyymmddhhmiss')<=nvl(dsi.end_time,'99991231235959')
+where to_char(osp.paytime,'yyyymmdd')>='20211109' and osp.change_type = '下单'
+union all
+--宝宝派
+select
+  to_char(osp.paytime,'yyyymmdd') as pay_date,
+  osp.spu_erp_id,
+  osp.spu_no,
+  osp.spu_id,
+  osp.system_type,
+  osp.order_id,
+  osp.order_no,
+  ds.avg_purchase_price,-- 平均采购价
+  ds.supply_price, -- 供货单价
+  ds.purchase_guide_max_price,--采购指导价最高
+  ds.purchase_guide_min_price,--采购指导价最低
+  ds.product_no,
+  ds.pms_spu_id,
+  ds.lms_pd_id,
+  osp.current_sku_qty,
+  osp.sales_qty,
+  ooa.site_id,
+  osp.sku_erp_id,
+  nvl(coalesce(ds.avg_purchase_price,ds.supply_price,purchase_guide_max_price,purchase_guide_min_price),0) as purchase_price,
+  nvl(dsi.discount_info,1) as discount_info
+from popopiedc.dwd_order_sales_process osp
+inner join (
+      select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+left join popopiedc.dim_spu ds
+on (osp.spu_no = ds.product_no)
+left join @discount_sku_info dsi
+on osp.sku_erp_id = dsi.sku_id and to_char(osp.paytime,'yyyymmddhhmiss')>=nvl(dsi.start_time,'99991231235959') and to_char(osp.paytime,'yyyymmddhhmiss')<=nvl(dsi.end_time,'99991231235959')
+where to_char(osp.paytime,'yyyymmdd')>='20211109' and osp.change_type = '下单'
+;
+
+insert overwrite table app_looklook_erp_every_day_purchasecost_new partition(dt)
+select
+    bigint(a.site_id) as site_id,
+    a.pay_date,
+    sum(purchase_price*a.sales_qty*discount_info) as purchase_cost,
+    a.pay_date -- 动态分区的字段
+from @order_info a
+group by
+  a.pay_date,
+  a.site_id
+;

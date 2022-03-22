@@ -1,0 +1,3 @@
+select *
+from dwd_looklook_clear_report_delivery_rate_detail_snapshot t
+where t.pt <= '${date}' and t.ops_site_id = '19332' and t.data_dt BETWEEN '20211201' and '20211231';

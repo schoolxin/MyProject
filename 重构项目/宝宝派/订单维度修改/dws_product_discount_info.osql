@@ -1,0 +1,125 @@
+--name:dws_product_discount_info
+--author:order
+--create time:2021-11-16 14:59
+@product_sku_discount_info:=
+select
+   distinct
+   b.old_no as oldno
+  ,b.id as spu_id
+  ,to_char(a.starttime,'yyyymmddhhmiss') as start_time
+  ,c.id as sku_id
+  ,if(to_char(nvl(c.endtime,getdate()),'yyyymmddhhmiss')<='20211111235959',to_char(nvl(c.endtime,getdate()),'yyyymmddhhmiss'),'20211111235959') as end_time  --为了跟新数据衔接
+  ,a.discount
+  ,regexp_extract(a.discount,'(\\d)',1)/10 as discount_info
+from ods_erp_erp_product_spudiscount a
+inner join ods_erp_erp_product_spu b
+on (a.oldno = b.old_no and b.pt = '${date}')
+inner join ods_erp_erp_product_sku c
+on (b.id = c.spu_id and c.pt = '${date}')
+where a.pt = '${date}' and to_char(a.starttime,'yyyymmddhhmiss')<='20211111235959';
+;
+
+
+@erp_sku_discount:=
+select
+   distinct
+   t.spu_id
+  ,t.oldno
+  ,t.sku_id
+  ,t.start_time
+  ,t.end_time as org_end_time
+  ,t.lag_start_date as end_time
+  ,t.discount_info
+  ,'erp' as sys_source
+from
+(
+    select
+      a.spu_id,
+      a.oldno,
+      a.sku_id,
+      a.start_time,
+      a.end_time,
+      a.discount_info,
+      lead(start_time,1,end_time) over (partition by a.sku_id order by a.start_time asc) as lag_start_date
+  from @product_sku_discount_info a
+) t
+;
+
+--20210918180000
+@oms_product_info_pre:=
+select
+   t.product_no
+  ,t.pms_spu_id
+  ,t.start_time
+  ,t.end_time
+  ,t.discount_info
+  ,lead(start_time,1,end_time) over (partition by t.product_no order by t.start_time asc) as lag_start_date
+from
+(
+      select
+       concat(tt.pt,'000000') as start_time
+      ,to_char(getdate(),'yyyymmddhhmiss') as end_time
+      ,if(tt.discount_state=1,tt.discount/10,10/10) as discount_info
+      ,tt.discount_state
+      ,tt.pms_spu_id
+      ,tt.product_no
+    from opdc.dim_spu_price tt
+    where tt.pt<='${date}' and tt.discount_state!=0
+    union all
+    select
+       concat(tt.pt,'000000') as start_time
+      ,to_char(getdate(),'yyyymmddhhmiss') as end_time
+      ,if(tt.discount_state=1,tt.discount/10,10/10) as discount_info
+      ,tt.discount_state
+      ,tt.pms_spu_id
+      ,tt.product_no
+    from popopiedc.dim_spu_price tt -- 宝宝派数据
+    where tt.pt<='${date}' and tt.discount_state!=0
+) t
+;
+@lms_sku_discount:=
+select
+   distinct
+   pip.pms_spu_id
+  ,pip.product_no
+  ,ds.pms_sku_id
+  ,pip.start_time
+  ,pip.end_time as org_end_time
+  ,pip.lag_start_date as end_time
+  ,pip.discount_info
+  ,'lms' as sys_source
+from @oms_product_info_pre pip
+inner join
+(
+  select ds.pms_sku_id,ds.product_no
+  from opdc.dim_sku ds
+  union all
+  select ds.pms_sku_id,ds.product_no
+  from popopiedc.dim_sku ds
+) ds
+on (pip.product_no = ds.product_no)
+;
+
+insert overwrite table dws_product_discount_info partition (pt = '${date}')
+select
+   lsd.product_no
+  ,lsd.pms_spu_id
+  ,lsd.pms_sku_id
+  ,lsd.start_time
+  ,lsd.end_time
+  ,lsd.discount_info
+  ,lsd.org_end_time
+  ,lsd.sys_source
+from @lms_sku_discount lsd
+union all
+select
+   esd.oldno as product_no
+  ,string(esd.spu_id) as pms_spu_id
+  ,string(esd.sku_id) as pms_sku_id
+  ,esd.start_time
+  ,esd.end_time
+  ,esd.discount_info
+  ,esd.org_end_time
+  ,esd.sys_source
+from @erp_sku_discount esd
+;

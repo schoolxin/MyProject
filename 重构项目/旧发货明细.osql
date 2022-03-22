@@ -1,0 +1,100 @@
+@mapping_erp_site_info:=
+select  a.site_name,
+        a.site_id,
+        case when b.site_type_id = 4 then a.cod_erp_site_id else a.erp_site_id end as erp_site_id
+from dwd_mapping_erp_site_id a
+join ods_looklook_looklook_tb_site b
+on (a.site_id = b.id and b.pt='${date}')
+where a.pt='${date}'
+;
+-- 换货
+@orderexchange:=
+select
+  t.order_id,t.order_goods_id
+from
+(
+  select trans_array(1,',',orderid,ordergoodsids) as (order_id,order_goods_id)
+  from ods_erp_erp_order_orderexchange tt
+  where tt.pt = '${date}'
+) t
+group by t.order_id,t.order_goods_id
+;
+
+
+--发货收入
+--每个订单总重量和价格 均摊剔除掉换货的商品  mdf 20210324
+@weight_price:=
+select
+    oog.id,
+    ps.weight,
+    if(oog.price=0,oog.currency_price/nvl(o.currency_rate,1),oog.price) as price,
+    oog.order_id,
+    o.site_id,
+    o.order_price-o.discount_price as order_price_usd,
+    sum(ps.weight) over (partition by oog.order_id ) as sumweight,
+    sum(if(oog.price=0,oog.currency_price/nvl(o.currency_rate,1),oog.price)) over (partition by oog.order_id ) as sumamt,
+    count(oog.id) over (partition by oog.order_id ) as counts
+from
+(
+  select oog.id,oog.price,oog.order_id,oog.currency_price,oog.spu_id
+  from ods_erp_erp_order_order_goods oog
+  left anti join @orderexchange ox
+  on (oog.id = ox.order_goods_id and oog.order_id = ox.order_id)
+  where oog.pt = '${date}'
+) oog
+left join  ods_erp_erp_order_order o on oog.order_id = o.id and o.pt = '${date}'
+left join  ods_erp_erp_product_spu  ps on oog.spu_id = ps.id and ps.pt = '${date}'
+
+;
+
+--每个订单中每个商品价格比例
+@price_rate:=
+select
+     a.order_id,
+     a.id,
+     a.order_price_usd,
+     a.site_id,
+     case when a.sumamt <>0 then a.price/sumamt
+          else
+              case when sumweight <>0 then a.weight/sumweight else 1/counts end -- 如果价格和重量都是0 则商品均摊订单的价格eg:订单价格100有三件商品 则每件商品100/3
+     end as price_rate
+from @weight_price a
+;
+-- 订单中每个商品的预估价格
+@goods_pre_price:=
+select
+    a.order_id,
+    a.id,
+    a.site_id,
+    a.order_price_usd*a.price_rate as pre_price
+from @price_rate a
+;
+
+
+@delivery_gmv:=
+select to_char(a.delivery_time,'yyyymmdd') as trans_date,sum(c.pre_price) as order_price_usd,c.site_id,a.express_no,c.order_id
+from (
+  select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+  from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+) a
+left join (select ldd.*,row_number() over (partition by ldd.bill_id order by ldd.create_time desc) as rns from ods_erp_erp_logistics_delivery_detail ldd where ldd.pt = '${date}') b
+on (a.id = b.delivery_id and a.rn = 1 and b.rns =1)
+join @goods_pre_price c
+on (a.order_id = c.order_id and b.bill_id = c.id)
+where  to_char(a.delivery_time,'yyyymmdd')<='${date}'
+group by to_char(a.delivery_time,'yyyymmdd'),c.site_id,a.express_no,c.order_id
+;
+
+select
+  nvl(a.site_id,0) as site_id,
+  nvl(a.site_name,'other') as site_name,
+  b.trans_date,
+  b.order_price_usd*dcct.currency_transform_cny as order_price_cny,
+  b.express_no,
+  b.order_id
+from @mapping_erp_site_info a
+inner join @delivery_gmv b
+on (a.erp_site_id = b.site_id)
+left join dwd_com_currency_transform dcct
+on (b.trans_date=dcct.data_dt and dcct.currency_code= 'USD' and dcct.pt= '${date}')
+;

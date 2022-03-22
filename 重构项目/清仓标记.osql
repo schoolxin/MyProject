@@ -1,0 +1,36 @@
+select
+  t.order_id,
+  t.sku_erp_id as sku_id,
+  t.if_cleared,
+  t.order_time
+from
+(
+  select
+    osp.order_id,
+    osp.sku_erp_id,
+    osp.sku_id,
+    osp.spu_no,
+    substring(t3.start_clear_time,1,8) as cleared_date,
+       case when to_char(osp.addtime,'yyyymmddhhmiss')>=nvl(t3.start_clear_time,'99991231235959') and to_char(osp.addtime,'yyyymmddhhmiss') <= nvl(t3.end_clear_time,'99991231235959') then 'cleared'
+            else 'un_cleared'
+       end if_cleared,
+    t3.start_clear_time,
+    t3.end_clear_time,
+    to_char(osp.addtime,'yyyymmddhhmiss') as order_time
+  from opdc.dwd_order_sales_process osp
+  inner join (
+    select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+  ) ooa
+  on (osp.order_id = ooa.order_id)
+  left join dws_product_clear_tag_info t3
+  on (osp.sku_erp_id=t3.sku_id and t3.pt='${date}' and t3.start_clear_time<=to_char(osp.addtime,'yyyymmddhhmiss'))
+  where 1=1 and  osp.change_type = '下单' and to_char(osp.addtime,'yyyymmdd') >='20211101'
+--  and osp.spu_no = 'SP10DI0J1RH'
+) t
+where t.if_cleared = 'cleared'
+group by
+  t.order_id,
+  t.sku_erp_id,
+  t.if_cleared,
+  t.order_time
+;

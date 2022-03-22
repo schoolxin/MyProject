@@ -1,0 +1,311 @@
+--name:原始退拒比例明细
+--author:order
+--create time:2021-11-08 16:12
+@mapping_erp_site_info:=
+select  a.site_name,
+        a.site_id,
+        case when b.site_type_id = 4 then a.cod_erp_site_id else a.erp_site_id end as erp_site_id
+from dwd_mapping_erp_site_id a
+join ods_looklook_looklook_tb_site b
+on (a.site_id = b.id and b.pt='${date}')
+where a.pt='${date}'
+;
+@orderexchange:=
+select
+  t.order_id,t.order_goods_id
+from
+(
+  select trans_array(1,',',orderid,ordergoodsids) as (order_id,order_goods_id)
+  from ods_erp_erp_order_orderexchange tt
+  where tt.pt = '${date}'
+) t
+group by t.order_id,t.order_goods_id
+;
+@weight_price:=
+select
+    oog.id as order_goods_id,
+    nvl(ps.weight,0) as weight,
+    nvl(if(oog.price=0,oog.currency_price/o.currency_rate,oog.price),0) as price,
+--    oog.order_id,
+    o.id as order_id,
+    o.site_id,
+    oog.spu_id,
+    oog.sku_id,
+    ps.old_no,
+    o.order_price-o.discount_price as order_price_usd,
+    o.add_time as order_date,
+    o.pay_time,
+    ps.tag,
+    ps.source_url,
+    o.order_no,
+    ps.category_id,
+    oog.status,
+    o.erpstatus,
+    o.verify_tag,
+    nvl(oog.is_delivery,0) as is_delivery,
+    case when oog.status = 2 or o.erpstatus = 10  or o.verify_tag = 6 then 1 else 0 end is_cancel,
+    case when oog.create_time > sg.create_time then '库存'
+         when sp.base_type = 3               then '零采账期'
+         when sp.base_type in(1,2,7)         then '生产'
+         else '零采现结'
+    end basetype,
+    sum(ps.weight) over (partition by o.id ) as sumweight,
+    sum(if(oog.price=0,oog.currency_price/o.currency_rate,oog.price)) over (partition by o.id ) as sumamt,
+    count(oog.id) over (partition by o.id ) as counts,
+    o.country
+from  ods_erp_erp_order_order o
+left join
+(
+    select oog.*
+    from ods_erp_erp_order_order_goods oog
+    left anti join @orderexchange ox -- 剔除掉换货取消的商品
+    on (oog.id = ox.order_goods_id and oog.order_id = ox.order_id)
+    where oog.pt = '${date}'
+) oog on oog.order_id = o.id
+left join  ods_erp_erp_product_spu  ps on oog.spu_id = ps.id and ps.pt = '${date}'
+left join  ods_erp_erp_supplier_profile sp on sp.id = ps.supplier_id and sp.pt = '${date}'
+left join
+(
+  select b.*,row_number() over (partition by b.order_goods_id order by b.create_time desc)  as rn
+  from ods_erp_erp_order_goods_lock_relation b where b.pt = '${date}' and b.is_delete = 0
+) glr on glr.order_goods_id = oog.id and glr.rn = 1 --0318c 库存锁定
+left join  ods_erp_erp_stock_goods sg on sg.id = glr.stock_goods_id and sg.pt = '${date}'
+where o.pt = '${date}' and o.pay_time is not null and o.status not in ('1','2')
+;
+
+
+--select order_goods_id,count(1) as cnt from @weight_price a group by order_goods_id  having count(1) >1;
+
+@price_rate:=
+select
+     distinct
+     a.order_id,
+     a.order_price_usd,
+     a.site_id,
+     a.spu_id,
+     a.sku_id,
+     a.tag,
+     a.order_date,
+     a.pay_time,
+     price as spu_prcie,
+     a.source_url,
+     a.order_no,
+     a.old_no,
+     a.order_goods_id,
+     case when nvl(b.is_standard,0) = 1 then 1 else 0 end as is_standard, -- 是否为标品
+     a.sumamt,
+     a.sumweight,
+     a.counts,
+     a.status,
+     a.is_delivery,
+     a.erpstatus,
+     a.verify_tag,
+     case when a.order_goods_id is null then 1
+     else
+         case when a.sumamt <>0 then a.price/sumamt
+              else
+                  case when sumweight <>0 then a.weight/sumweight else 1/counts end -- 如果价格和重量都是0 则商品均摊订单的价格eg:订单价格100有三件商品 则每件商品100/3
+         end
+     end as price_rate,
+     a.is_cancel,
+     a.basetype,
+     a.country
+from @weight_price a
+left join ods_erp_erp_product_category b
+on (a.category_id = b.id and b.pt = '${date}')
+;
+
+--售卖系统中未支付的订单需要在erp中剔除掉
+@shop_unpaid_order:=
+select
+    a.order_id,
+    a.site_type,
+    b.erp_order_id
+from dwd_looklook_allsitetype_order_info a
+inner join dwd_mapping_erp_order_id b
+on (a.order_id = b.site_order_id and b.pt = '${date}')
+where a.pt = '${date}' and lower(a.financial_status) = 'unpaid' and a.order_date>='20210501'
+;
+
+-- 订单中每个商品的预估价格
+@goods_pre_price:=
+select
+    a.order_id,
+    a.site_id,
+    a.spu_id,
+    a.sku_id,
+    a.tag,
+    a.order_date,
+    a.pay_time,
+    a.order_price_usd*a.price_rate as pre_price,
+    a.order_price_usd,
+    a.source_url,
+    a.order_no,
+    a.price_rate,
+    a.old_no,
+    a.order_goods_id,
+    a.is_standard,
+    a.status,
+    a.erpstatus,
+    a.verify_tag,
+    a.is_cancel,
+    a.is_delivery,
+    a.basetype,
+    a.country
+from @price_rate a
+where a.order_id not in (select erp_order_id from @shop_unpaid_order a where length(erp_order_id)>0 group by erp_order_id)
+;
+
+
+
+--select * from @goods_pre_price a where a.order_goods_id = '17952658';
+
+-- 发货数据
+@delivery_cost:=
+select
+     ldd.bill_id,
+     ld.delivery_time,
+     ld.order_id,
+     ldd.goods_id
+from
+(
+  select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+  from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+) ld
+join (select ldd.*,row_number() over (partition by ldd.bill_id order by ldd.create_time desc) as rns from ods_erp_erp_logistics_delivery_detail ldd where ldd.pt = '${date}') ldd
+on (ld.id = ldd.delivery_id and ld.rn = 1 and ldd.rns = 1)
+where to_char(ld.delivery_time,'yyyymmdd') <='${date}'
+;
+-- 判断是否发货
+@is_delivery_goods_info:=
+select
+   a.order_id,
+   a.order_date,
+   a.pay_time,
+   a.old_no,
+   a.sku_id,
+   a.pre_price  as goods_price_usd,
+   a.order_price_usd,
+   a.price_rate,
+   b.goods_id,
+   b.delivery_time,
+   a.site_id,
+   a.order_goods_id,
+   a.is_standard,
+   a.is_cancel,-- 商品是否取消
+   a.basetype as base_type_level1,
+   case when a.basetype = '零采现结' then '非账期' else '账期' end  as base_type_level0,
+   case when b.delivery_time is null then -999 else  datediff(b.delivery_time,a.pay_time,'dd') end as date_depart, -- 发货时效，如果-999则表示没有发货
+   case when to_char(a.pay_time,'yyyymmdd')<'20210315' then
+              case when a.is_standard = 0 then
+                          case when a.basetype = '零采现结' then 0.15
+                               when a.basetype = '生产' then case when to_char(a.pay_time,'yyyymmdd') <'20210125' then 0.20 else 0.25 end
+                               when a.basetype = '零采账期' then 0.13
+                               else case when to_char(a.pay_time,'yyyymmdd') <'20210125' then 0.07 else 0.02 end
+                          end
+                   else
+                      case when a.basetype = '零采现结' then 0.13
+                           when a.basetype = '生产' then case when to_char(a.pay_time,'yyyymmdd') <'20210125' then 0.20 else 0.25 end
+                           when a.basetype = '零采账期' then 0.11
+                           else case when to_char(a.pay_time,'yyyymmdd') <'20210125' then 0.05 else 0.02 end
+                      end
+              end
+        else
+              case when a.basetype = '零采现结' then 0.12
+                   when a.basetype = '生产' then 0.18
+                   when a.basetype = '零采账期' then 0.09
+                   else 0.03
+              end
+   end as default_refund_rate, -- 默认比例
+   a.country
+from @goods_pre_price a
+left join @delivery_cost b
+on (a.order_id = b.order_id and a.order_goods_id= b.bill_id)
+;
+--select * from @is_delivery_goods_info a where to_char(a.pay_time,'yyyymmdd')='20200501';
+@refund_rate_pre:=
+select
+   a.order_id,
+   a.order_date,
+   a.pay_time,
+   a.old_no,
+   a.sku_id,
+   a.goods_price_usd,
+   a.order_price_usd,
+   a.price_rate,
+   a.goods_id,
+   a.delivery_time,
+   a.site_id,
+   a.order_goods_id,
+   a.is_standard,
+   a.is_cancel,-- 商品是否取消
+   a.base_type_level1,
+   a.base_type_level0,
+   a.date_depart,
+   a.default_refund_rate,
+   case when a.date_depart = -999 then -999
+        when a.date_depart<=3 then -1
+        when a.date_depart>3 and a.date_depart <= 10 then 0
+        when a.date_depart>=10 and a.date_depart<15 then 1
+        when a.date_depart>=15 and a.date_depart<20 then 2
+        when a.date_depart>=20 and a.date_depart<25 then 3
+        else 4
+   end  date_depart_flag,
+   case when datediff(getdate(),a.pay_time,'dd')<=3 then -1
+        when datediff(getdate(),a.pay_time,'dd')>3 and datediff(getdate(),a.pay_time,'dd') <= 10 then 0
+        when datediff(getdate(),a.pay_time,'dd')>=10 and datediff(getdate(),a.pay_time,'dd')<15 then 1
+        when datediff(getdate(),a.pay_time,'dd')>=15 and datediff(getdate(),a.pay_time,'dd')<20 then 2
+        when datediff(getdate(),a.pay_time,'dd')>=20 and datediff(getdate(),a.pay_time,'dd')<25 then 3
+        else 4
+   end  date_depart_flag1,
+   a.country
+from @is_delivery_goods_info a
+;
+
+@refund_rate_daily:=
+select
+ distinct
+ tb1.*
+from
+(
+  select
+    /* +mapjoin (a)*/
+    a.is_standard,
+    a.date_depart_flag,
+    a.base_type,
+    a.refund_rate,
+    t.date_id as data_dt
+from
+(
+    select
+      to_char(date_id) as date_id
+    from dim_com_calender
+    where to_char(date_id) <= '${date}' and to_char(date_id)>='20190601'
+)t,
+(
+  select *
+  from ods_looklook_looklook_tb_category_refund_rate_order a
+  where a.pt = '${date}' and a.start_date is not null
+) a
+where t.date_id>=a.start_date and t.date_id<a.end_date
+) tb1
+;
+@goods_refund_rate_1:=
+select
+  a.*,
+  case when a.is_cancel = 1 then 0 -- 如果物品取消了则退据比例为100%   20200512 取消商品不计入退拒比例的计算
+       else
+           case when b.base_type is not null then b.refund_rate -- 如果物品发货了就按发货的比例算
+                else
+                case when a.default_refund_rate > c.refund_rate then a.default_refund_rate else c.refund_rate end -- 如果没有发货则取预设和发货时效中最大的比例
+           end
+  end as refund_rate
+from @refund_rate_pre a
+left join @refund_rate_daily b
+on (to_char(a.pay_time,'yyyymmdd') = b.data_dt and a.base_type_level0 = b.base_type and a.date_depart_flag = b.date_depart_flag and a.is_standard = b.is_standard and a.delivery_time is not null)
+left join @refund_rate_daily c
+on (to_char(a.pay_time,'yyyymmdd') = c.data_dt and a.base_type_level0 = c.base_type and a.date_depart_flag1 = c.date_depart_flag and a.is_standard = c.is_standard and a.delivery_time is null)
+;
+
+
+select  * from @goods_refund_rate_1 a where a.site_id = '41594' and to_char(a.order_date,'yyyymmdd') = '20211105';

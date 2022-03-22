@@ -1,0 +1,1583 @@
+--name:均摊
+--author:order
+--create time:2021-12-16 16:54
+--折扣
+@sku_info:=
+select
+*
+from
+(
+    select
+     dk.pms_sku_id,dk.pms_spu_id,dk.product_no,row_number() over (partition by dk.pms_sku_id order by dk.level asc) as rn
+    from
+    (
+      select ds.pms_sku_id,ds.pms_spu_id,ds.product_no,if(nvl(lower(dss.system),'other') = 'lms',1,2) as level
+      from opdc.dim_sku ds
+      inner join opdc.dim_spu dss
+      on (ds.pms_spu_id = dss.pms_spu_id)
+      union all
+      select ds.pms_sku_id,ds.pms_spu_id,ds.product_no,if(nvl(lower(dss.system),'other') = 'lms',1,2) as level
+      from popopiedc.dim_sku ds
+      inner join popopiedc.dim_spu dss
+      on (ds.pms_spu_id = dss.pms_spu_id)
+    ) dk
+) dk
+where dk.rn = 1
+
+
+
+;
+@discount_sku_info:=
+select
+  t.pms_spu_id as spu_id,t.product_no as oldno,t.pms_sku_id as sku_id,t.start_time,t.end_time,t.discount_info
+from dws_product_discount_info t
+where t.pt = '${date}'
+;
+--select a.sku_id ,a.start_time from @discount_sku_info a group by a.sku_id ,a.start_time having count(1)>1;
+
+@user_job:=
+select
+    user_id,
+    tuj.user_name as user_name,
+    job_id,
+    obj_id,
+    obj_type,
+    site_id,
+    group_id,
+    project_id,
+    business_unit_id,
+    start_date,
+    end_date,
+    ltj.name as job_name
+from ods_looklook_looklook_tb_user_job tuj
+join ods_looklook_looklook_tb_job ltj
+on tuj.job_id = ltj.id and ltj.pt = '${date}'
+where tuj.pt='${date}' and tuj.end_date is null and ltj.name in ('长线大站站长','长线小站站长','业务单元负责人','孵化项目部负责人','事业部负责人')
+;
+@user_info:=
+select
+  distinct
+  uj.obj_id,
+  uj.obj_type,
+  coalesce(
+  siter.site_user_name,
+  group.group_user_name,
+  project.project_user_name,
+  bu.bu_user_name) as user_name
+from
+(
+    select distinct obj_id,obj_type,site_id,group_id,project_id,business_unit_id from @user_job
+) uj
+left join
+(
+  select
+      obj_id as site_id,
+      concat_ws(',',collect_set(user_name)) as site_user_name
+  from @user_job
+  where job_name in ('长线大站站长','长线小站站长')
+  and obj_type='site'
+  group by obj_id
+)siter
+on uj.site_id=siter.site_id
+left join
+(
+  select
+      obj_id as group_id,
+      concat_ws(',',collect_set(user_name)) as group_user_name
+  from @user_job
+  where job_name in ('业务单元负责人','孵化项目部负责人')
+  and obj_type='group'
+  group by obj_id
+)group
+on uj.group_id=group.group_id
+left join
+(
+  select
+      obj_id as project_id,
+      concat_ws(',',collect_set(user_name)) as project_user_name
+  from @user_job
+  where job_id in (19)
+  and obj_type='project' and 1=2
+  group by obj_id
+)project
+on uj.project_id=project.project_id
+left join
+(
+  select
+      obj_id as business_unit_id,
+      concat_ws(',',collect_set(user_name)) as bu_user_name
+  from @user_job
+  where job_name in ('事业部负责人')
+  and obj_type='business_unit'
+  group by obj_id
+)bu
+on uj.business_unit_id=bu.business_unit_id
+;
+
+
+
+
+
+
+@mapping_erp_order:=
+select  cc.site_order_id,cc.erp_order_id,cc.site_id,cc.erp_site_id,cc.erp_order_date
+from
+(
+    select cc.site_order_id,cc.erp_order_id,cc.site_id,cc.erp_site_id,cc.erp_order_date,row_number() over (partition by  cc.site_id,cc.site_order_id order by cc.erp_order_date desc)  as rn
+    from dwd_mapping_erp_order_id cc where cc.pt = '${date}'
+) cc
+where 1=1 and cc.rn = 1;
+
+
+@worldpay:=
+select
+    distinct
+    t1.order_id,
+    t1.site_id,
+    t1.site_name,
+    t1.trans_date  as trans_date
+from dwd_looklook_allpaytype_trans_order_info t1
+where t1.trans_type in ('CHARGED_BACK','REFUNDED')  and t1.pt ='${date}' and t1.payment_type = 'worldpay'
+;
+@paypal:=
+select
+  distinct
+  t1.order_id,
+  t1.site_id,
+  t1.site_name,
+  t1.trans_date as trans_date
+from dwd_looklook_allpaytype_trans_order_info t1
+where t1.pt='${date}' and t1.trans_type in('T1110','T1201','T1106','T1116','T1107') and t1.trans_amount<0 and t1.payment_type = 'paypal'
+;
+
+@pacypay:=
+select
+    distinct
+    a.trans_date as trans_date,
+    a.order_id,
+    a.site_id,
+    a.site_name
+from dwd_looklook_allpaytype_trans_order_info a
+where a.pt= '${date}' and a.payment_type = 'pacypay' and a.trans_type in ('部分退款','退款','拒付')
+;
+@ingenico:=
+select
+  distinct
+  a.trans_date as trans_date,
+  a.order_id as order_id,
+  a.site_id,
+  a.site_name
+from dwd_looklook_allpaytype_trans_order_info a
+where a.pt = '${date}' and a.payment_type = 'ingenico' and a.trans_type in ('1800','1500')
+;
+
+@checkout:=
+select
+    distinct
+    a.trans_date,
+    a.order_id,
+    a.site_id,
+    a.site_name
+from dwd_looklook_allpaytype_trans_order_info a
+where a.payment_type='checkout'  and a.pt='${date}' and (lower(a.trans_type) rlike 'refunded' or lower(a.trans_type) rlike 'chargeback')
+;
+@adyen:=
+select
+     distinct
+     a.trans_date as trans_date,
+     a.order_id,
+     a.site_id,
+     a.site_name
+from dwd_looklook_allpaytype_trans_order_info a
+where a.payment_type='adyen'  and a.pt='${date}' and a.trans_type in ('Refunded','Chargeback','SecondChargeback');
+;
+
+@pingpong:=
+select
+     distinct
+     a.trans_date as trans_date,
+     a.order_id,
+     a.site_id,
+     a.site_name
+from dwd_looklook_allpaytype_trans_order_info a
+where a.payment_type='pingpong'  and a.pt='${date}' and a.trans_type in ('REFUND','1st_chargeback','2nd_chargeback');
+;
+@xborder:=
+select
+     distinct
+     a.trans_date as trans_date,
+     a.order_id,
+     a.site_id,
+     a.site_name
+from dwd_looklook_allpaytype_trans_order_info a
+where a.payment_type='xborder'  and a.pt='${date}' and a.trans_type in ('refund-Approved','chargeback-1次拒付','chargeback-2次拒付');
+
+@paidy:=
+select
+     distinct
+     a.trans_date as trans_date,
+     a.order_id,
+     a.site_id,
+     a.site_name
+from dwd_looklook_allpaytype_trans_order_info a
+where a.payment_type='paidy'  and a.pt='${date}' and a.trans_type in ('refund');
+
+@ebanx:=
+select
+     distinct
+     a.trans_date as trans_date,
+     a.order_id,
+     a.site_id,
+     a.site_name
+from dwd_looklook_allpaytype_trans_order_info a
+where a.payment_type='ebanx'  and a.pt='${date}' and a.trans_type in ('refund');
+
+@credorax:=
+select
+     distinct
+     a.trans_date as trans_date,
+     a.order_id,
+     a.site_id,
+     a.site_name
+from dwd_looklook_allpaytype_trans_order_info a
+where a.payment_type='credorax'  and a.pt='${date}' and a.trans_type in ('Refund','1st Chargeback','2nd Chargeback','1st Chargeback Allocation','Re-presentment Reversal');
+
+@cardpay:=
+select
+     distinct
+     a.trans_date as trans_date,
+     a.order_id,
+     a.site_id,
+     a.site_name
+from dwd_looklook_allpaytype_trans_order_info a
+where a.payment_type='cardpay'  and a.pt='${date}' and a.trans_type in ('refund','charged_back');
+
+@airwallex:=
+select
+     distinct
+     a.trans_date as trans_date,
+     a.order_id,
+     a.site_id,
+     a.site_name
+from dwd_looklook_allpaytype_trans_order_info a
+where a.payment_type='airwallex'  and a.pt='${date}' and (abs(a.chargebacks)+abs(refunds))!=0;
+
+@stripe:=
+select
+     distinct
+     a.trans_date as trans_date,
+     a.order_id,
+     a.site_id,
+     a.site_name
+from dwd_looklook_allpaytype_trans_order_info a
+where a.payment_type='stripe'  and a.pt='${date}' and (abs(a.chargebacks)+abs(refunds))!=0;
+
+
+
+@all_paytype_trans_info:=
+select
+  min(tb1.trans_date) as trans_date,
+  tb1.order_id,
+  tb1.site_id,
+  tb1.site_name
+from
+(
+   select
+    a.trans_date,
+    a.order_id,
+    a.site_id,
+    a.site_name
+   from @stripe a
+   union all
+   select
+      a.trans_date,
+      a.order_id,
+      a.site_id,
+      a.site_name
+    from @airwallex a
+    union all
+    select
+      a.trans_date,
+      a.order_id,
+      a.site_id,
+      a.site_name
+    from @adyen a
+    union all
+    select
+      a.trans_date,
+      a.order_id,
+      a.site_id,
+      a.site_name
+    from @checkout a
+    union all
+    select
+      a.trans_date,
+      a.order_id,
+      a.site_id,
+      a.site_name
+    from @ingenico a
+    union all
+    select
+      a.trans_date,
+      a.order_id,
+      a.site_id,
+      a.site_name
+    from @pacypay a
+    union all
+    select
+      a.trans_date,
+      a.order_id,
+      a.site_id,
+      a.site_name
+    from @paypal a
+    union all
+    select
+      a.trans_date,
+      a.order_id,
+      a.site_id,
+      a.site_name
+    from @worldpay a
+    union all
+    select
+      a.trans_date,
+      a.order_id,
+      a.site_id,
+      a.site_name
+    from @pingpong a
+    union all
+    select
+      a.trans_date,
+      a.order_id,
+      a.site_id,
+      a.site_name
+    from @cardpay a
+    union all
+    select
+      a.trans_date,
+      a.order_id,
+      a.site_id,
+      a.site_name
+    from @credorax a
+    union all
+    select
+      a.trans_date,
+      a.order_id,
+      a.site_id,
+      a.site_name
+    from @ebanx a
+    union all
+    select
+      a.trans_date,
+      a.order_id,
+      a.site_id,
+      a.site_name
+    from @paidy a
+    union all
+    select
+      a.trans_date,
+      a.order_id,
+      a.site_id,
+      a.site_name
+    from @xborder a
+) tb1
+group by tb1.order_id,tb1.site_id,tb1.site_name
+--where tb1.trans_date = '20200428';
+;
+
+--select * from @all_paytype_trans_info;
+@erp_order_refund_info:=
+select
+  a.trans_date,
+  b.erp_order_id,
+  b.erp_site_id,
+  a.order_id,
+  a.site_id,
+  a.site_name
+from @all_paytype_trans_info a
+left join @mapping_erp_order b
+on (a.order_id = b.site_order_id and a.site_id = b.site_id)
+;
+
+
+
+
+@site_position_daily:=
+select
+    /* +mapjoin (a)*/
+    t.date_id as data_dt,
+    a.site_id,
+    a.site_name,
+    a.site_type_id,
+    a.position,
+    a.start_date,
+    a.end_date
+from
+(
+    select
+      to_char(date_id) as date_id
+    from dim_com_calender
+    where to_char(date_id) <= '${date}' and date_id>='20200401'
+)t
+,
+(
+  select a.site_id,lower(b.site_name) as site_name,b.site_type_id,
+         replace(nvl(a.allowance_start_date,a.start_date),'-','') as start_date,
+         nvl(replace(a.allowance_end_date,'-',''),'${date}') as end_date,
+         a.position
+  from ods_looklook_looklook_tb_site_position a
+  inner join ods_looklook_looklook_tb_site b
+  on (a.site_id = b.id and b.pt = '${date}')
+  where a.pt = '${date}'
+) a
+where t.date_id between a.start_date and a.end_date
+;
+
+@refund_rate_daily:=
+select
+ distinct
+ tb1.*
+from
+(
+  select
+    /* +mapjoin (a)*/
+    a.is_standard,
+    a.date_depart_flag,
+    a.base_type,
+    a.refund_rate,
+    t.date_id as data_dt
+from
+(
+    select
+      to_char(date_id) as date_id
+    from dim_com_calender
+    where to_char(date_id) <= '${date}' and to_char(date_id)>='20190601'
+)t,
+(
+  select *
+  from ods_looklook_looklook_tb_category_refund_rate a
+  where a.pt = '${date}'
+) a
+where t.date_id>=a.start_date and t.date_id<a.end_date
+) tb1
+;
+
+@cnytousd:=
+select a.data_dt,1/a.currency_transform_cny as  currency_transform
+from dwd_com_currency_transform a
+where a.pt = '${date}' and a.currency_code = 'USD';
+
+
+
+
+
+
+@test_product_info:=
+select
+    a.product_no as product_spu,
+    '19701231235959' as test_start_date,
+    nvl(a.start_time,'19701231235959') as test_produce_date,
+    nvl(a.end_time,'19701231235959') as test_in_stock_date,
+    a.is_standard,
+    a.purchase_price
+from dws_product_test_in_date_info a
+where a.pt = '${date}'
+;
+
+
+@mapping_erp_site_info:=
+select  a.site_name,
+        a.site_id,
+        case when b.site_type_id = 4 then a.cod_erp_site_id else a.erp_site_id end as erp_site_id,
+        b.site_type_id
+from dwd_mapping_erp_site_id a
+join ods_looklook_looklook_tb_site b
+on (a.site_id = b.id and b.pt='${date}')
+where a.pt='${date}'
+;
+-- 按支付日期算收入
+-- shopify
+@shopify_order:=
+select a.id,min(b.created_at) as pay_time,min(a.total_price_usd) as total_price_usd,min(a.total_price) as total_price,a.site_name
+from ods_looklook_mongodb_shopify_order a
+inner join ods_looklook_mongodb_shopify_transaction b
+on (a.id=b.order_id and b.pt = '${date}' and b.status = 'success' and b.kind in ('sale','authorization'))
+where lower(a.financial_status) in ('paid','partially_refunded','refunded') and a.pt = '${date}' and lower(a.gateway) not like '%cod%'
+group by a.id,a.created_at,a.site_name
+union all
+select a.id,min(b.created_at) as pay_time,min(a.total_price_usd) as total_price_usd,min(a.total_price) as total_price,a.site_name
+from ods_looklook_mongodb_shopify_order a
+inner join ods_looklook_mongodb_shopify_transaction b
+on (a.id=b.order_id and b.pt = '${date}' and b.kind in ('sale','authorization'))
+where lower(a.financial_status) not in ('voided') and a.pt = '${date}' and lower(a.gateway)  rlike 'cod'
+group by a.id,a.created_at,a.site_name
+;
+
+@shopify_gmv:=
+select
+  lower(nvl(site.site_name,'other')) as site_name,
+  tom.site_id,
+  to_char(a.pay_time,'yyyymmdd') as pay_date,
+  sum(a.total_price_usd*cct.currency_transform_cny) as gmv_cny
+from @shopify_order a
+left join dwd_loolook_shopify_to_ops_mapping tom
+on (lower(a.site_name) = lower(tom.shopify_site_name) and tom.pt = max_pt('dwd_loolook_shopify_to_ops_mapping'))
+left join ods_looklook_looklook_tb_site site
+on (tom.site_id = site.id and site.pt = '${date}')
+left join dwd_com_currency_transform cct on (to_char(a.pay_time,'yyyymmdd') = cct.data_dt and 'USD' = cct.currency_code and cct.pt = '${date}')
+group by tom.site_id,lower(nvl(site.site_name,'other')) ,to_char(a.pay_time,'yyyymmdd')
+;
+
+-- cloud
+@cloud_gmv:=
+select soi.site_name,soi.site_id,to_char(a.pay_time,'yyyymmdd') as pay_date,sum(a.total*cct.currency_transform_cny) as gmv_cny
+from orderplus_HK.ods_cloud_orderplus_db_tb_order a
+left join ods_looklook_looklook_tb_cloudsite_attribute tca
+on a.site_id=tca.site_id and tca.pt=max_pt('ods_looklook_looklook_tb_cloudsite_attribute')
+left join dwd_com_site_org_info soi
+on tca.id=soi.site_mapping_id and soi.site_type_id in (2,4) and soi.origin_domain rlike 'chimpone' and soi.pt=max_pt('dwd_com_site_org_info')
+left join dwd_com_currency_transform cct on (to_char(a.pay_time,'yyyymmdd') = cct.data_dt and 'USD' = cct.currency_code and cct.pt = '${date}')
+where a.pt = '${date}' and lower(a.payment_status) in ('paid','partially_refunded','refunded') and nvl(a.special_sign,0)=0
+group by soi.site_name,soi.site_id,to_char(a.pay_time,'yyyymmdd')
+;
+-- shoplazza
+@shoplazza_gmv:=
+select
+  lower(nvl(site.site_name,'other')) as site_name,soi.site_id,to_char(a.placed_at,'yyyymmdd') as pay_date,sum(a.total_price*cct.currency_transform_cny) as gmv_cny
+from
+(   select a.site_name,a.placed_at,a.total_price,a.currency,
+           case when lower(a.financial_status)!='cancelled' and lower(get_json_object(a.payment_line,'$.payment_channel')) = 'cod' then 'paid'
+                else financial_status
+           end as financial_status
+    from ods_looklook_mongodb_shoplazza_order a where a.pt = '${date}'
+) a
+left join dwd_loolook_shoplazza_to_ops_mapping soi
+on lower(a.site_name)=lower(soi.shopify_site_name) and soi.pt=max_pt('dwd_loolook_shoplazza_to_ops_mapping')
+left join ods_looklook_looklook_tb_site site
+on (soi.site_id = site.id and site.pt = '${date}')
+left join dwd_com_currency_transform cct
+on (to_char(a.placed_at,'yyyymmdd') = cct.data_dt and a.currency = cct.currency_code and cct.pt = '${date}')
+where 1=1 and lower(a.financial_status) in ('paid','partially_refunded','refunded')
+group by lower(nvl(site.site_name,'other')),soi.site_id,to_char(a.placed_at,'yyyymmdd');
+-- 独立站
+@spsite_gmv:=
+select
+  a.site_name,a.site_id,substring(replace(a.txn_at,'-',''),1,8) as pay_date,sum(a.total_amount*cct.currency_transform_cny) as gmv_cny
+from dwd_looklook_allsitetype_order_info a
+left join dwd_com_currency_transform cct
+on (substring(replace(a.txn_at,'-',''),1,8) = cct.data_dt and a.currency_code = cct.currency_code and cct.pt = '${date}')
+where a.pt = '${date}' and a.site_type = 'spsite' and a.txn_at is not null
+group by a.site_name,a.site_id,substring(replace(a.txn_at,'-',''),1,8);
+--self_site
+@self_site_gmv:=
+select
+  a.site_name,a.site_id,substring(replace(a.txn_at,'-',''),1,8) as pay_date,sum(a.total_amount*b.currency_transform_cny) as gmv_cny
+from dwd_looklook_self_site_order_info a
+left join dwd_com_currency_transform b
+on (substring(replace(a.txn_at,'-',''),1,8) = b.data_dt and a.currency_code = b.currency_code and b.pt = '${date}')
+where a.pt = '${date}' and lower(a.payment_status) in ('paid','refunded','delivered')
+group by a.site_name,a.site_id,substring(replace(a.txn_at,'-',''),1,8)
+;
+-- woo
+@woo_site_gmv:=
+select
+    a.site_name,a.site_id,substring(replace(a.txn_at,'-',''),1,8) as pay_date,sum(a.total_amount*cct.currency_transform_cny) as gmv_cny
+from dwd_looklook_allsitetype_order_info a
+left join dwd_com_currency_transform cct
+on (substring(replace(a.txn_at,'-',''),1,8) = cct.data_dt and a.currency_code = cct.currency_code and cct.pt = '${date}')
+where a.pt = '${date}' and a.site_type = 'woocommerce' and a.financial_status = 'paid'
+group by a.site_name,a.site_id,substring(replace(a.txn_at,'-',''),1,8)
+;
+
+@all_site_type_gmv:=
+select
+  site_name,
+  bigint(site_id) as site_id,
+  pay_date,
+  gmv_cny
+from @spsite_gmv
+union all
+select
+  site_name,
+  site_id,
+  pay_date,
+  gmv_cny
+from @shoplazza_gmv
+union all
+select
+  site_name,
+  site_id,
+  pay_date,
+  gmv_cny
+from @cloud_gmv
+union all
+select
+  site_name,
+  site_id,
+  pay_date,
+  gmv_cny
+from @shopify_gmv
+union all
+select
+  site_name,
+  site_id,
+  pay_date,
+  gmv_cny
+from @self_site_gmv
+union all
+select
+  site_name,
+  bigint(site_id) as site_id,
+  pay_date,
+  gmv_cny
+from @woo_site_gmv
+;
+-- opshop  aliexpress Amazon 以及单页站 收入
+-- 亚马逊拆站
+@spa_site_info:=
+-- SPA 站
+select ds.site_id,ds.ops_site_id from opdc.dim_site  ds where ds.site_type = 'SPA单页站' and ds.ops_site_id is not null
+union all
+-- 亚马逊
+select ds.site_id,ds.ops_site_id from opdc.dim_site  ds where ds.site_type = 'amazon' and ds.ops_site_id is not null
+union all
+--shopee
+select ds.site_id,ds.ops_site_id from opdc.dim_site  ds where ds.site_type = 'shopee' and ds.ops_site_id is not null
+union all
+--aliexpress myopshop
+select ds.site_id,ds.ops_site_id from opdc.dim_site  ds where ds.site_id in (519,10) and ds.ops_site_id is not null
+
+;
+
+@erp_spa_sale_amount :=
+select
+   to_char(osp.paytime,'yyyymmdd') as data_dt
+  ,ssi.ops_site_id as site_id
+  ,soi.site_name
+  ,soi.site_type_id
+  ,sum(osp.order_amt*cct.currency_transform_cny) as gmv_cny
+  ,count(distinct osp.order_id) as order_cnt
+from
+(
+  select osp.addtime,osp.currency_name as currency_code ,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.order_id,osp.paytime
+  from opdc.dwd_order_sales_process osp
+  where osp.change_type = '下单' and osp.order_amt>0
+  and osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0)
+  group by osp.addtime,osp.currency_name,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)),osp.order_id,osp.paytime
+  union all
+  select osp.addtime,osp.currency_name as currency_code ,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.order_id,osp.paytime
+  from popopiedc.dwd_order_sales_process osp
+  where osp.change_type = '下单' and osp.order_amt>0
+  and osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+  group by osp.addtime,osp.currency_name,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)),osp.order_id,osp.paytime
+) osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+  union all
+  select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+inner join @spa_site_info  ssi
+on (ooa.site_id = ssi.site_id)
+left join dwd_com_site_org_info soi
+on ssi.ops_site_id=soi.site_id and soi.pt=max_pt('dwd_com_site_org_info')
+left join dwd_com_currency_transform cct
+on to_char(osp.paytime,'yyyymmdd')=cct.data_dt and cct.currency_code= osp.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where to_char(osp.paytime,'yyyymmdd')>='20211201'
+group by
+   to_char(osp.paytime,'yyyymmdd')
+  ,ssi.ops_site_id
+  ,soi.site_type_id
+  ,soi.site_name
+;
+
+
+@sale_amount :=
+select
+    nvl(sa.site_id,ssa.site_id) as site_id,
+    nvl(sa.site_name,ssa.site_name) as site_name,
+    nvl(sa.pay_date,ssa.data_dt) as data_dt,
+    nvl(soi.site_type_id,ssa.site_type_id) as  site_type_id,
+    case
+        when nvl(soi.site_type_id,ssa.site_type_id) =4 then ssa.gmv_cny
+        else nvl(sa.gmv_cny,ssa.gmv_cny)
+    end as total_amount
+from @all_site_type_gmv sa
+left join dwd_com_site_org_info soi
+on soi.site_id=sa.site_id and soi.pt=max_pt('dwd_com_site_org_info')
+full join @erp_spa_sale_amount ssa
+on sa.site_id=ssa.site_id and sa.pay_date=ssa.data_dt
+;
+
+-- 每日营销花费
+@market_cost_1 :=
+select
+     dmc.data_dt
+    ,dmc.site_id
+    ,dmc.site_name
+    ,sum((dmc.market_cost-dmc.service_fees)*cct.currency_transform_cny) as market_cost
+    ,sum(case when  dmc.market_channel='google' then dmc.market_cost*cct.currency_transform_cny end) as google_cost
+    ,sum(case when  dmc.market_channel='fb' then dmc.market_cost*cct.currency_transform_cny end) as facebook_cost
+from app_looklook_daily_market_cost dmc
+left join dwd_com_currency_transform cct
+on dmc.currency_code=cct.currency_code and dmc.data_dt=cct.data_dt and cct.pt=max_pt('dwd_com_currency_transform')
+where dmc.pt='${date}'
+group by
+     dmc.data_dt
+    ,dmc.site_id
+    ,dmc.site_name
+;
+-- 每日测款营销花费
+@test_market_cost:=
+select
+    dtmc.data_dt,
+    dtmc.site_id,
+    dtmc.site_name,
+    sum(dtmc.test_market_cost_cny) as test_market_cost_cny
+from app_looklook_daily_test_market_cost dtmc
+where dtmc.pt = '${date}'
+group by
+  dtmc.data_dt,
+  dtmc.site_id,
+  dtmc.site_name
+;
+@market_cost:=
+select
+    nvl(a.data_dt,b.data_dt) as data_dt,
+    nvl(a.site_id,b.site_id) as site_id,
+    lower(nvl(a.site_name,b.site_name)) as site_name,
+    nvl(a.market_cost,0) as market_cost,
+    nvl(a.facebook_cost,0) as facebook_cost,
+    nvl(a.google_cost,0) as google_cost,
+    nvl(b.test_market_cost_cny,0) as test_market_cost_cny
+from @market_cost_1 a
+full join @test_market_cost b
+on (a.site_id = b.site_id  and a.data_dt = b.data_dt)
+;
+
+@fin_summary:=
+select
+  nvl(a.site_id,b.site_id) as obj_id,
+  nvl(a.site_name,b.site_name) as obj_name,
+  nvl(a.data_dt,b.data_dt) as data_dt,
+  nvl(a.total_amount,0) as sale_amount,
+  nvl(b.market_cost,0) as market_cost_cny
+from @sale_amount a
+full join @market_cost b
+on (a.site_id = b.site_id and a.site_name = b.site_name and a.data_dt = b.data_dt)
+;
+
+--select * from @fin_summary cc where cc.data_dt = '20200917';
+
+-- 月度站点营销占比
+@site_market_cost_rate:=
+select
+    a.obj_id,
+    a.obj_name,
+    nvl(b.business_unit_name,'other') as business_unit_name,
+    substring(a.data_dt,1,6) as data_month,
+    sum(a.sale_amount) as sale_amount,
+    sum(a.market_cost_cny) as market_cost_cny,
+    case when sum(a.sale_amount) = 0 and sum(a.market_cost_cny) != 0 then -1 when sum(a.market_cost_cny) = 0 then 0 else sum(a.market_cost_cny)/sum(a.sale_amount) end as market_cost_rate
+from @fin_summary a
+left join dwd_com_site_org_info b
+on (a.obj_id = b.site_id and b.pt = '${date}')
+where a.obj_id>0
+group by a.obj_id,substring(a.data_dt,1,6),a.obj_name,nvl(b.business_unit_name,'other')
+;
+
+@site_market_cost_final:=
+select
+     a.obj_id,
+     a.obj_name,
+     a.business_unit_name,
+     data_month,
+     sale_amount,
+     market_cost_cny,
+     sum(a.sale_amount) over (partition by a.business_unit_name,data_month) as sale_amount_bu,
+     sum(a.market_cost_cny) over (partition by a.business_unit_name,data_month) as market_cost_cny_bu,
+     a.market_cost_rate,
+     case when sum(a.sale_amount) over (partition by a.business_unit_name,data_month) = 0 and (sum(a.market_cost_cny) over (partition by a.business_unit_name,data_month))!=0 then -1
+          when sum(a.market_cost_cny) over (partition by a.business_unit_name,data_month)=0 then 0
+          else (sum(a.market_cost_cny) over (partition by a.business_unit_name,data_month)) / (sum(a.sale_amount) over (partition by a.business_unit_name,data_month))
+     end as market_cost_rate_bu
+from @site_market_cost_rate a
+;
+--select * from @site_market_cost_final;
+
+--select count(1) as cnt,a.erp_site_id from @mapping_erp_site_info a group by a.erp_site_id having cnt>1;
+
+-- 账期和非账期
+@base_type:=
+select
+   ds.pms_spu_id
+  ,case when nvl(dsr.base_type,0) in(0,5,6) then '非账期' else '账期' end  as base_type
+from (select ds.pms_spu_id,ds.supplier_id,row_number() over (partition by ds.pms_spu_id order by ds.pms_spu_id desc) as rn from opdc.dim_spu ds) ds
+join opdc.dim_supplier dsr
+on (ds.supplier_id = dsr.id and rn =1)
+union all
+select
+   ds.pms_spu_id
+  ,case when nvl(dsr.base_type,0) in(0,5,6) then '非账期' else '账期' end  as base_type
+from (select ds.pms_spu_id,ds.supplier_id,row_number() over (partition by ds.pms_spu_id order by ds.pms_spu_id desc) as rn from popopiedc.dim_spu ds) ds
+join opdc.dim_supplier dsr
+on (ds.supplier_id = dsr.id and rn =1)
+;
+-- 需要记录下每月  发货的sku 数据  用于下月的时候相减 均摊剩余的订单收入  订单号   sku  发货数量  发货金额
+@order_goods_sale_info_purchase:=
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+  ,sum(abs(osp.good_price_currency)*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as good_price_currency
+  ,sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,to_char(osp.addtime,'yyyymmdd') as order_date
+  ,nvl(osp.erp_order_id,osp.order_id) as erp_order_id
+  ,osp.paytime as pay_date
+from (
+  select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from opdc.dwd_order_sales_process osp
+  union all
+  select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from popopiedc.dwd_order_sales_process osp
+  where osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+) osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+  union all
+  select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where 1=1 and (osp.change_type in ('下单') or (osp.change_details_type = '替换上' and osp.change_type = '换货') or (osp.change_details_type = '添加补发商品' and osp.change_type = '补发'))
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.currency_name
+  ,nvl(osp.sku_erp_id,osp.sku_id)
+  ,to_char(osp.addtime,'yyyymmdd')
+  ,osp.erp_order_id
+  ,osp.paytime
+;
+@order_goods_sale_info_cancel:=
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+  ,abs(sum(osp.good_price_currency*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty))) as good_price_currency
+  ,abs(sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty))) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,to_char(osp.addtime,'yyyymmdd') as order_date
+  ,nvl(osp.erp_order_id,osp.order_id) as erp_order_id
+  ,osp.paytime as pay_date
+from (
+  select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from opdc.dwd_order_sales_process osp
+  union all
+  select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from popopiedc.dwd_order_sales_process osp
+  where osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+) osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+  union all
+  select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where 1=1 and (change_details_type = '被替换商品的取消' and change_type = '取消')
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.currency_name
+  ,nvl(osp.sku_erp_id,osp.sku_id)
+  ,to_char(osp.addtime,'yyyymmdd')
+  ,osp.erp_order_id
+  ,osp.paytime
+;
+
+
+-- 剔除取消的商品 如果剔除后的数量为负数则置为0
+
+@order_goods_sale_info:=
+select
+   sip.site_id
+  ,sip.order_no
+  ,sip.order_id
+  ,sip.order_amt
+  ,sip.sku_id
+  ,sip.good_price_currency
+  ,sip.current_sku_qty
+  ,sip.currency_name
+  ,sip.order_date
+  ,sip.erp_order_id
+  ,sip.pay_date
+  ,nvl(sic.good_price_currency,0) as good_price_currency_cancel
+  ,nvl(sic.current_sku_qty,0) as current_sku_qty_cancel
+  ,if(sip.good_price_currency-nvl(sic.good_price_currency,0)<0,0,sip.good_price_currency-nvl(sic.good_price_currency,0)) as good_price_currency_final
+  ,if(sip.current_sku_qty-nvl(sic.current_sku_qty,0)<0,0,sip.current_sku_qty-nvl(sic.current_sku_qty,0)) as current_sku_qty_final
+from @order_goods_sale_info_purchase sip
+left join @order_goods_sale_info_cancel sic
+on (sip.order_id = sic.order_id and sip.site_id = sip.site_id and sip.sku_id = sic.sku_id)
+where to_char(sip.pay_date,'yyyymmdd') >= '20190101'
+;
+@weight_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.good_price_currency_final -- 订单物品总金额
+    ,t.current_sku_qty_final -- 订单物品总数量
+    ,t.currency_name
+    ,t.order_date
+    ,t.pay_date
+    ,t.erp_order_id
+    ,sum(t.current_sku_qty_final) over (partition by t.order_id ) as sum_counts
+    ,sum(t.good_price_currency_final) over (partition by t.order_id ) as sum_amount
+from
+(
+  select
+     gsi.site_id
+    ,gsi.order_no
+    ,gsi.order_id
+    ,gsi.order_amt
+    ,gsi.sku_id
+    ,gsi.good_price_currency -- 订单物品总金额
+    ,gsi.current_sku_qty -- 订单物品总数量
+    ,gsi.currency_name
+    ,gsi.order_date
+    ,gsi.erp_order_id
+    ,gsi.pay_date
+    ,gsi.good_price_currency_final
+    ,gsi.current_sku_qty_final
+  from @order_goods_sale_info gsi
+) t
+;
+--- 只要 关联到锁库 并且 关联到库存表  订单日期在入库时间之后 就认为是库存
+--- 使用sku 平均发货时效作为订单明细表sku的发货时间  因为订单明细表中的没有物品维度 并且一个sku只有一条记录 即使该sku买了多个也只有一条数据 没法做到每一个物品找到对应的发货时间
+-- dw_logistics_package_shipments 发货表
+@price_rate_oms:=
+select
+     wp.site_id
+    ,wp.order_no
+    ,wp.order_id
+    ,wp.order_amt
+    ,wp.sku_id
+    ,wp.good_price_currency_final -- 订单物品总金额
+    ,wp.current_sku_qty_final -- 订单物品总数量
+    ,wp.currency_name
+    ,wp.sum_counts
+    ,wp.sum_amount
+    ,case when wp.sum_amount<> 0 then wp.good_price_currency_final/wp.sum_amount
+          when wp.sum_counts= 0 then 0
+          else current_sku_qty_final/sum_counts
+     end as price_rate
+    ,wp.order_date
+    ,wp.pay_date
+    ,wp.erp_order_id
+    ,si.pms_spu_id as spu_erp_id
+    ,si.product_no as spu_no
+from @weight_price_oms wp
+left join @sku_info si
+on (wp.sku_id = si.pms_sku_id)
+;
+
+
+@goods_pre_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.good_price_currency_final -- 订单物品总金额
+    ,t.current_sku_qty_final -- 订单物品总数量
+    ,t.currency_name
+    ,t.sum_counts
+    ,t.sum_amount
+    ,t.price_rate
+    ,t.order_amt*t.price_rate as pre_price
+    ,t.order_date
+    ,t.erp_order_id
+    ,oa.country
+    ,t.pay_date
+    ,t.spu_no
+    ,t.spu_erp_id
+from @price_rate_oms t
+left join (
+  select t.order_id,t.country,row_number() over (partition by t.order_id order by t.modified_date desc) as rn from opdc.dw_order_address t where t.address_type = '2'
+  union all
+  select t.order_id,t.country,row_number() over (partition by t.order_id order by t.modified_date desc) as rn from popopiedc.dw_order_address t where t.address_type = '2'
+ ) oa
+on (t.order_id = oa.order_id and oa.rn = 1)
+
+;
+-- 发货数据
+@site_delivery_info_oms:=
+select
+   lps.order_id
+  ,lps.deliverytime as delivery_date
+  ,lps.expressno
+  ,lps.skuid as skuid
+  ,lps.actualfee as logistics_cost_cny
+  ,sum(lps.goodscount) as sku_count
+from opdc.dw_logistics_package_shipments lps
+where to_char(lps.deliverytime,'yyyymmdd')>='20211101'
+and lps.deliverystatus != '清关退回'
+and lps.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0)
+group by
+   lps.order_id
+  ,lps.deliverytime
+  ,lps.expressno
+  ,lps.skuid
+  ,lps.actualfee
+union all
+select
+   lps.order_id
+  ,lps.deliverytime as delivery_date
+  ,lps.expressno
+  ,lps.skuid as skuid
+  ,lps.actualfee as logistics_cost_cny
+  ,sum(lps.goodscount) as sku_count
+from popopiedc.dw_logistics_package_shipments lps
+where to_char(lps.deliverytime,'yyyymmdd')>='20211101'
+and lps.deliverystatus != '清关退回'
+and lps.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+group by
+   lps.order_id
+  ,lps.deliverytime
+  ,lps.expressno
+  ,lps.skuid
+  ,lps.actualfee
+;
+
+@delivery_gmv_info_oms:=
+select
+  sdio.delivery_date
+ ,gpp.order_id
+ ,gpp.order_no
+ ,sdio.skuid
+ ,sdio.expressno
+ ,sdio.sku_count as delivery_sku_count
+ ,gpp.pre_price  -- 总物品均摊金额
+ ,gpp.currency_name
+ ,gpp.order_amt
+ ,gpp.price_rate
+ ,gpp.good_price_currency_final
+ ,gpp.current_sku_qty_final as order_sku_count
+ ,gpp.site_id
+ ,gpp.pay_date
+ ,sdio.logistics_cost_cny
+ ,ini.is_standard  -- 是否标品
+ ,ini.test_start_date --广告测试日期 目前已经没有了
+ ,ini.test_produce_date --测试成功日期
+ ,ini.test_in_stock_date -- 入库日期
+ ,case when to_char(gpp.pay_date,'yyyymmddhhmiss') >= ini.test_produce_date
+            and to_char(gpp.pay_date,'yyyymmddhhmiss')<ini.test_in_stock_date then 1
+       else 0
+  end as is_test
+ ,datediff(sdio.delivery_date,gpp.pay_date,'dd') as date_depart -- 发货时效
+ ,ini.purchase_price
+ ,gpp.country
+ ,gpp.spu_no
+ ,gpp.spu_erp_id
+from @site_delivery_info_oms sdio
+inner join @goods_pre_price_oms gpp
+on (sdio.order_id = nvl(gpp.order_id,gpp.erp_order_id) and sdio.skuid = gpp.sku_id)
+inner join @test_product_info ini
+on (gpp.spu_no = ini.product_spu)
+;
+@delivery_goods_info:=
+select
+     delivery_date
+    ,order_id
+    ,order_no
+    ,skuid
+    ,spu_id
+    ,expressno
+    ,delivery_sku_count
+    ,pre_price
+    ,currency_name
+    ,order_amt
+    ,price_rate
+    ,good_price_currency_final
+    ,order_sku_count
+    ,site_id
+    ,pay_date
+    ,logistics_cost_cny
+    ,spu_no
+    ,is_standard
+    ,test_start_date
+    ,test_produce_date
+    ,test_in_stock_date
+    ,is_test
+    ,date_depart
+    ,case when a.is_test = 1 then '1'
+          else if(date_depart<=25,'1','0')
+     end  as is_counted_income -- 是否算作收入或者物流
+    ,a.purchase_price
+    ,nvl(dsi.discount_info,1) as discount_info
+    ,nvl(bt.base_type,'非账期') as base_type
+    ,case when a.date_depart<=3 then -1
+        when a.date_depart>3 and a.date_depart <= 10 then 0
+        when a.date_depart>=10 and a.date_depart<15 then 1
+        when a.date_depart>=15 and a.date_depart<20 then 2
+        when a.date_depart>=20 and a.date_depart<25 then 3
+        else 4
+    end  date_depart_flag
+   ,if(a.is_test = 1,0.08,1) as test_refund_rate -- 测试款的退拒比例
+   ,a.country
+from @delivery_gmv_info_oms a
+left join @discount_sku_info dsi
+on a.skuid = dsi.sku_id and to_char(a.pay_date,'yyyymmddhhmiss')>=nvl(dsi.start_time,'99991231235959') and to_char(a.pay_date,'yyyymmddhhmiss')<nvl(dsi.end_time,'99991231235959')
+left join @base_type bt
+on (a.spu_erp_id = bt.pms_spu_id)
+--where to_char(a.delivery_date,'yyyymmdd') >= '20211201'
+;
+
+@delivery_bussiness:=
+select
+    a.*
+   ,b.refund_rate
+   ,case when nvl(a.country,'other') in ('US') then case when a.is_test = 0 then b.refund_rate*1.3 else a.test_refund_rate*1.3 end
+         when nvl(a.country,'other') in ('CA') then case when a.is_test = 0 then b.refund_rate*0.9 else a.test_refund_rate*0.9 end
+         else case when a.is_test = 0 then b.refund_rate*0.8 else a.test_refund_rate*0.8 end
+    end as refunds_rate
+from @delivery_goods_info a
+left join @refund_rate_daily b
+on (to_char(a.delivery_date,'yyyymmdd') = b.data_dt and a.base_type = b.base_type and a.date_depart_flag = b.date_depart_flag and a.is_standard = b.is_standard)
+where a.is_counted_income = '1'
+;
+
+@erp_financial:=
+select
+   to_char(a.delivery_date,'yyyymmdd') as data_dt
+  ,a.site_id as erp_site_id
+  ,sum(if(a.order_sku_count=0,0,a.pre_price*(a.delivery_sku_count/a.order_sku_count))*cct.currency_transform_cny) as delivery_gmv_currency_cny
+  ,sum(if(a.order_sku_count=0,0,a.pre_price*(a.delivery_sku_count/a.order_sku_count))*cct.currency_transform) as delivery_gmv_currency_usd
+  ,0 as allowance_amount_cny
+  ,0 as market_cost_cny
+  ,sum(a.purchase_price*a.discount_info*a.delivery_sku_count) as purchase_cost_cny
+  ,0 as logistics_cost_cny
+  ,0 as payment_fees_cny
+  ,sum(if(a.order_sku_count=0,0,a.pre_price*(a.delivery_sku_count/a.order_sku_count))*cct.currency_transform_cny*a.refunds_rate) as refunds_cny
+from @delivery_bussiness a
+left join dwd_com_currency_transform cct
+on (to_char(a.delivery_date,'yyyymmdd') = cct.data_dt and lower(a.currency_name) = lower(cct.currency_code) and cct.pt = '${date}')
+group by to_char(a.delivery_date,'yyyymmdd'),a.site_id
+;
+
+--select * from @erp_financial a where a.data_dt = '20211216';
+-- 发货的商品不会取消
+@refund_not_delivery_info:=
+select
+     a.site_id,
+     a.site_name,
+     a.trans_date,
+     b.pre_price,
+     b.price_rate,
+     a.order_id,
+     b.order_date，
+     b.currency_name
+from @erp_order_refund_info a
+join @goods_pre_price_oms b
+on (a.erp_order_id = nvl(b.erp_order_id,b.order_id))
+;
+
+-- 退据订单未发货
+@cancel_order_gmv:=
+select
+    a.site_id as site_id,
+    a.site_name,
+    a.trans_date as order_date,
+    sum(a.pre_price*cct.currency_transform_cny) as cancel_order_gmv
+from @refund_not_delivery_info a
+left join  dwd_com_currency_transform cct
+on a.trans_date= cct.data_dt and a.currency_name = cct.currency_code and cct.pt= '${date}'
+group by a.site_id,a.site_name,a.trans_date
+;
+--select * from @refund_not_delivery_info a where a.trans_date>='20211201';
+@site_cancel_gmv:=
+select
+  b.order_date,
+  b.site_id,
+  b.site_name,
+  b.cancel_order_gmv,
+  case when nvl(c.market_cost_rate,-1) = -1 then
+            case when c.market_cost_rate_bu = -1 then cancel_order_gmv
+                 when c.market_cost_rate_bu is null then 0
+                 else c.market_cost_rate_bu*cancel_order_gmv
+            end
+       else c.market_cost_rate*cancel_order_gmv
+  end as cancel_order_market_cost_cny, -- 营销花费
+  c.market_cost_rate,
+  c.market_cost_rate_bu
+from @cancel_order_gmv b
+left join @site_market_cost_final c
+on (b.site_id = c.obj_id and b.site_name = c.obj_name and substring(b.order_date,1,6) = c.data_month)
+;
+
+@org_daily_revenue_2:=
+select
+     b.data_dt, -- 发货日期
+     a.site_id as obj_id,
+     a.site_name,
+     a.site_type_id,
+     b.delivery_gmv_currency_cny as gmv_amount_cny,
+     b.allowance_amount_cny, -- 补贴
+     case when nvl(c.market_cost_rate,-1) = -1 then
+          case when c.market_cost_rate_bu = -1 then delivery_gmv_currency_cny
+               when c.market_cost_rate_bu is null then 0
+               else c.market_cost_rate_bu*delivery_gmv_currency_cny
+          end
+          else c.market_cost_rate*delivery_gmv_currency_cny
+     end as market_cost_cny, -- 营销花费
+     b.purchase_cost_cny,
+     b.logistics_cost_cny,
+     case when a.site_type_id in (1,5,4) then b.delivery_gmv_currency_cny*0.06 -- shopify 店匠 单页面 6%
+          else b.delivery_gmv_currency_cny*0.04  -- 云站 独立站 4%
+     end  as payment_fees_cny, -- 平台费用
+     b.refunds_cny as refunds_chargeback_cny,
+     c.market_cost_rate,
+     c.market_cost_rate_bu,
+     b.delivery_gmv_currency_cny*fr.fees_rate as site_fees
+from @mapping_erp_site_info a
+inner join @erp_financial b
+on (a.erp_site_id = b.erp_site_id)
+left join @site_market_cost_final c
+on (a.site_id = c.obj_id and a.site_name = c.obj_name and substring(b.data_dt,1,6) = c.data_month)
+left join app_looklook_cloud_site_every_month_fees_rate fr
+on (a.site_id = fr.site_id and substring(b.data_dt,1,6)= fr.data_month and fr.pt= '${date}')
+;
+
+@org_daily_revenue_1:=
+select
+  nvl(a.data_dt,b.order_date) as data_dt,
+  nvl(a.obj_id,b.site_id) as obj_id,
+  nvl(a.site_name,b.site_name) as site_name,
+  a.site_type_id,
+  a.gmv_amount_cny,
+  a.allowance_amount_cny, -- 补贴
+  a.market_cost_cny, -- 营销花费
+  a.purchase_cost_cny,
+  a.logistics_cost_cny,
+  a.payment_fees_cny, -- 平台费用
+  a.refunds_chargeback_cny,
+  a.market_cost_rate,
+  a.market_cost_rate_bu,
+  b.cancel_order_gmv,
+  b.cancel_order_market_cost_cny,
+  'site' as obj_type,
+  a.site_fees
+from @org_daily_revenue_2 a
+full join @site_cancel_gmv b
+on (a.data_dt = b.order_date and a.obj_id = b.site_id)
+;
+-- 发货维度物流和采购占比
+@delivery_deminsion_cost_rate:=
+select
+  a.data_dt,
+  a.obj_id,
+  a.obj_type,
+  case when a.gmv_amount_cny = 0 and a.logistics_cost_cny>0 then 1  when a.gmv_amount_cny = 0 and a.logistics_cost_cny= 0 then 0 else a.logistics_cost_cny/a.gmv_amount_cny end as logistics_cost_rate,
+  case when a.gmv_amount_cny = 0 and a.purchase_cost_cny>0 then 1  when a.gmv_amount_cny = 0 and a.purchase_cost_cny= 0 then 0 else a.purchase_cost_cny/a.gmv_amount_cny end as purchase_cost_rate
+from  app_looklook_site_delivery_financial_summary a
+where a.pt = '${date}'  and a.obj_id>0
+;
+
+
+@org_daily_revenue_pre:=
+select
+   tb2.data_dt,
+   tb2.obj_id,
+   tb2.site_name,
+   tb2.site_type_id,
+   tb2.gmv_amount_cny,
+   tb2.allowance_amount_cny,
+   tb2.market_cost_cny, -- 营销花费
+   tb2.purchase_cost_cny,
+   tb2.logistics_cost_cny,
+   tb2.payment_fees_cny, -- 平台费用
+   tb2.refunds_chargeback_cny,
+   tb2.market_cost_rate,
+   tb2.market_cost_rate_bu,
+   tb2.obj_type,
+   tb2.cancel_order_gmv,
+   tb2.cancel_order_market_cost_cny,
+   tb2.site_fees
+from
+(
+    select
+    tb1.*,
+    row_number() over (partition by  tb1.data_dt,tb1.obj_id order by tb1.allowance_amount_cny desc) rn
+    from
+    (
+        -- 长线站
+        select
+             a.data_dt, -- 发货日期
+             a.obj_id,
+             a.site_name,
+             a.site_type_id,
+             a.gmv_amount_cny,
+             case  when (datediff(to_date(a.data_dt,'yyyymmdd'),to_date(b.start_date,'yyyymmdd'),'mm')+1 <=3) and b.start_date<=a.data_dt and a.data_dt<=b.end_date  then a.gmv_amount_cny*0.2
+                   when (datediff(to_date(a.data_dt,'yyyymmdd'),to_date(b.start_date,'yyyymmdd'),'mm')+1 between 4 and 6) and b.start_date<=a.data_dt and a.data_dt<=b.end_date then a.gmv_amount_cny*0.1
+                   else 0
+             end as allowance_amount_cny, -- 补贴
+             a.market_cost_cny, -- 营销花费
+             a.purchase_cost_cny,
+             a.logistics_cost_cny,
+             a.payment_fees_cny, -- 平台费用
+             a.refunds_chargeback_cny,
+             a.market_cost_rate,
+             a.market_cost_rate_bu,
+             a.obj_type,
+             a.cancel_order_gmv,
+             a.cancel_order_market_cost_cny,
+             a.site_fees
+        from @org_daily_revenue_1 a
+        inner join (select * from @site_position_daily spd where spd.position = '2') b
+        on (a.obj_id = b.site_id and a.data_dt = b.data_dt)
+        union all
+        -- gg小站
+        select
+             spd.data_dt, -- 发货日期
+             to_char(spd.site_id) as obj_id,
+             spd.site_name,
+             spd.site_type_id,
+             nvl(b.gmv_amount_cny,0) as gmv_amount_cny,
+             100*cct.currency_transform_cny as allowance_amount_cny, -- 补贴
+             nvl(b.market_cost_cny,0) as market_cost_cny, -- 营销花费
+             nvl(b.purchase_cost_cny,0) as purchase_cost_cny,
+             nvl(b.logistics_cost_cny,0) as logistics_cost_cny,
+             nvl(b.payment_fees_cny,0) as payment_fees_cny, -- 平台费用
+             nvl(b.refunds_chargeback_cny,0) as refunds_chargeback_cny,
+             nvl(b.market_cost_rate,0) as market_cost_rate,
+             nvl(b.market_cost_rate_bu,0) as market_cost_rate_bu,
+             nvl(b.obj_type,'site') as obj_type,
+             nvl(b.cancel_order_gmv,0) as cancel_order_gmv,
+             nvl(b.cancel_order_market_cost_cny,0) as cancel_order_market_cost_cny,
+             nvl(b.site_fees,0) as site_fees
+        from (select * from @site_position_daily spd where spd.position = '1') spd
+        left join  @org_daily_revenue_1 b
+        on (spd.site_id = b.obj_id and spd.data_dt = b.data_dt)
+        left join (select * from dwd_com_currency_transform cct where cct.pt = '${date}' and cct.currency_code = 'USD') cct
+        on (spd.data_dt = cct.data_dt)
+    ) tb1
+) tb2
+where tb2.rn = 1
+union all
+select
+     a.data_dt, -- 发货日期
+     a.obj_id,
+     a.site_name,
+     a.site_type_id,
+     a.gmv_amount_cny,
+     0 as allowance_amount_cny, -- 补贴
+     a.market_cost_cny, -- 营销花费
+     a.purchase_cost_cny,
+     a.logistics_cost_cny,
+     a.payment_fees_cny, -- 平台费用
+     a.refunds_chargeback_cny,
+     a.market_cost_rate,
+     a.market_cost_rate_bu,
+     a.obj_type,
+     a.cancel_order_gmv,
+     a.cancel_order_market_cost_cny,
+     a.site_fees
+from @org_daily_revenue_1 a
+left anti join (select * from @site_position_daily spd where spd.position in ('1','2')) b
+on (a.obj_id = b.site_id and a.data_dt = b.data_dt)
+;
+
+---人力 管理成本
+@site_cost_manage:=
+select
+  a.data_dt,
+  a.site_id,
+  sum(a.labor_costs) as labor_costs,
+  sum(a.manage_costs) as manage_costs
+from app_looklook_daily_site_labor_manage_cost a
+where a.coefficient_type = 'delivery_dimension' and a.pt = '${date}'
+group by a.data_dt,a.site_id;
+
+@org_daily_revenue:=
+select
+    nvl(a.data_dt,b.data_dt) as data_dt,
+    nvl(a.obj_id,b.site_id) as obj_id,
+    nvl(a.obj_type,'site') as obj_type,
+    nvl(a.gmv_amount_cny,0) as gmv_amount_cny,
+    nvl(a.allowance_amount_cny,0) as allowance_amount_cny,
+    nvl(a.market_cost_cny,0) as market_cost_cny,
+    nvl(a.purchase_cost_cny,0) as purchase_cost_cny,
+    nvl(a.logistics_cost_cny,0) as logistics_cost_cny,
+    nvl(a.payment_fees_cny,0) as payment_fees_cny,
+    nvl(a.refunds_chargeback_cny,0) as refunds_chargeback_cny,
+    nvl(a.cancel_order_gmv,0) as cancel_order_gmv,
+    nvl(a.cancel_order_market_cost_cny,0) as cancel_order_market_cost_cny,
+    nvl(b.manage_costs,0) as management_cost_cny,
+    nvl(b.labor_costs,0) as labor_cost_cny,
+    nvl(a.site_fees,0) as site_fees
+from @org_daily_revenue_pre a
+full join @site_cost_manage b
+on (a.data_dt = b.data_dt and a.obj_id = b.site_id)
+;
+
+
+
+insert overwrite table app_looklook_daily_commission_business partition (pt='${date}')
+select
+    tb1.data_dt,
+    tb1.obj_id,
+    tb1.obj_type,
+    tb1.gmv_amount_cny,
+    tb1.allowance_amount_cny,
+    tb1.market_cost_cny,
+    tb1.purchase_cost_cny,
+    tb1.logistics_cost_cny,
+    tb1.payment_fees_cny,
+    tb1.refunds_chargeback_cny,
+    tb1.cny_usd_rate,
+    tb2.logistics_cost_rate,
+    tb2.purchase_cost_rate,
+    tb1.cancel_order_gmv,
+    round(tb1.cancel_order_market_cost_cny,2) as cancel_order_market_cost_cny,
+    tb1.management_cost_cny,
+    tb1.labor_cost_cny,
+    tb3.user_name,
+    tb1.site_fees,
+    tb1.master_id
+
+from
+(
+    select
+    odr.data_dt,
+    bigint(odr.obj_id) as obj_id,
+    obj_type,
+    gmv_amount_cny,
+    allowance_amount_cny,
+    market_cost_cny,
+    purchase_cost_cny,
+    logistics_cost_cny,
+    payment_fees_cny,
+    refunds_chargeback_cny,
+    ctd.currency_transform as cny_usd_rate,
+    odr.cancel_order_gmv,
+    odr.cancel_order_market_cost_cny,
+    odr.management_cost_cny,
+    odr.labor_cost_cny,
+    odr.site_fees,
+    nvl(site.master_id,odr.obj_id) as master_id
+  from
+  @org_daily_revenue odr
+  join @cnytousd ctd
+  on (odr.data_dt = ctd.data_dt)
+  left join ods_looklook_looklook_tb_site site
+  on (odr.obj_id = site.id and site.pt = '${date}')
+  union all
+  select
+      odr.data_dt,
+      coi.project_id as obj_id,
+      'project' as  obj_type,
+      sum(gmv_amount_cny) as gmv_amount_cny,
+      sum(allowance_amount_cny) as allowance_amount_cny,
+      sum(market_cost_cny) as market_cost_cny,
+      sum(purchase_cost_cny) as purchase_cost_cny,
+      sum(logistics_cost_cny) as logistics_cost_cny,
+      sum(payment_fees_cny) as payment_fees_cny,
+      sum(refunds_chargeback_cny) as refunds_chargeback_cny,
+      max(ctd.currency_transform) as cny_usd_rate,
+      sum(cancel_order_gmv) as cancel_order_gmv,
+      sum(cancel_order_market_cost_cny) as cancel_order_market_cost_cny,
+      sum(odr.management_cost_cny) as management_cost_cny,
+      sum(odr.labor_cost_cny) as labor_cost_cny,
+      sum(odr.site_fees) as site_fees,
+      string(coi.project_id) as master_id
+  from
+  @org_daily_revenue odr
+  join dwd_com_site_org_info coi
+  on odr.obj_id=coi.site_id and coi.pt=max_pt('dwd_com_site_org_info')
+  join @cnytousd ctd
+  on (odr.data_dt = ctd.data_dt)
+  where coi.business_unit_id is not null
+  group by
+      odr.data_dt
+     ,coi.project_id
+  union all
+  select
+      odr.data_dt,
+      coi.group_id as obj_id,
+      'group' as  obj_type,
+      sum(gmv_amount_cny) as gmv_amount_cny,
+      sum(allowance_amount_cny) as allowance_amount_cny,
+      sum(market_cost_cny) as market_cost_cny,
+      sum(purchase_cost_cny) as purchase_cost_cny,
+      sum(logistics_cost_cny) as logistics_cost_cny,
+      sum(payment_fees_cny) as payment_fees_cny,
+      sum(refunds_chargeback_cny) as refunds_chargeback_cny,
+      max(ctd.currency_transform) as cny_usd_rate,
+      sum(cancel_order_gmv) as cancel_order_gmv,
+      sum(cancel_order_market_cost_cny) as cancel_order_market_cost_cny,
+      sum(odr.management_cost_cny) as management_cost_cny,
+      sum(odr.labor_cost_cny) as labor_cost_cny,
+      sum(odr.site_fees) as site_fees,
+      string(coi.group_id) as master_id
+  from
+  @org_daily_revenue odr
+  join dwd_com_site_org_info coi
+  on odr.obj_id=coi.site_id and coi.pt=max_pt('dwd_com_site_org_info')
+  join @cnytousd ctd
+  on (odr.data_dt = ctd.data_dt)
+  where coi.business_unit_id is not null
+  group by
+      odr.data_dt
+     ,coi.group_id
+  union all
+  select
+      odr.data_dt,
+      coi.business_unit_id as obj_id,
+      'business_unit' as  obj_type,
+      sum(gmv_amount_cny) as gmv_amount_cny,
+      sum(allowance_amount_cny) as allowance_amount_cny,
+      sum(market_cost_cny) as market_cost_cny,
+      sum(purchase_cost_cny) as purchase_cost_cny,
+      sum(logistics_cost_cny) as logistics_cost_cny,
+      sum(payment_fees_cny) as payment_fees_cny,
+      sum(refunds_chargeback_cny) as refunds_chargeback_cny,
+      max(ctd.currency_transform) as cny_usd_rate,
+      sum(cancel_order_gmv) as cancel_order_gmv,
+      sum(cancel_order_market_cost_cny) as cancel_order_market_cost_cny,
+      sum(odr.management_cost_cny) as management_cost_cny,
+      sum(odr.labor_cost_cny) as labor_cost_cny,
+      sum(odr.site_fees) as site_fees,
+      string(coi.business_unit_id) as master_id
+  from @org_daily_revenue odr
+  join dwd_com_site_org_info coi
+  on odr.obj_id=coi.site_id and coi.pt=max_pt('dwd_com_site_org_info')
+  join @cnytousd ctd
+  on (odr.data_dt = ctd.data_dt)
+  where coi.business_unit_id is not null
+  group by
+      odr.data_dt
+     ,coi.business_unit_id
+) tb1
+left join @delivery_deminsion_cost_rate tb2
+on (tb1.obj_id = tb2.obj_id and tb1.obj_type = tb2.obj_type and tb1.data_dt = tb2.data_dt)
+left join @user_info tb3
+on (tb1.obj_id = tb3.obj_id and tb1.obj_type = tb3.obj_type)
+;

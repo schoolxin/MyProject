@@ -1,0 +1,2 @@
+select replace(regexp_replace(lower(trim('Merchandise/Services Not Received')),'\n|\t|\r',''),' ','');
+select replace(regexp_replace(lower(trim('Merchandise-Services Not Received')),'\n|\t|\r',''),' ','');

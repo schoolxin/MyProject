@@ -1,0 +1,180 @@
+--name:app_loolook_daily_commission_test_product_info
+--author:order
+--create time:2021-12-14 15:53
+-- 一天内多次测试成功  取最早的一次测试成功日期
+@product_test:=
+select
+   t.product_no
+  ,t.production_end_time
+from
+(
+    --非宝宝派
+    select
+     a.*
+    from
+    (
+        select
+           t.product_no
+          ,to_char(t.production_end_time,'yyyymmddhhmiss') as production_end_time
+          ,row_number() over (partition by t.product_no,to_char(t.production_end_time,'yyyymmdd') order by t.production_end_time asc) as rn
+        from
+        (
+          select stf.product_no,stf.production_end_time
+          from opdc.ods_bamboo_bamboo_pd_spu_test_form stf
+          inner join opdc.ods_bamboo_bamboo_common_dictionary   bcd
+          on (stf.production_status = bcd.value and bcd.group_identification = 'productTestSubStatus')
+          where bcd.name ='生产测试通过'
+          union all
+          select a.oldno as product_no,a.testspuproducetime as production_end_time
+          from ods_erp_erp_product_presale_follow a
+          where 1= 1 and a.pt = '${date}' and a.testresult = 2
+        ) t
+
+    ) a
+    where a.product_no in (select product_no from opdc.dim_spu)
+    -- 宝宝派
+    union all
+    select
+     a.*
+    from
+    (
+        select
+           t.product_no
+          ,to_char(t.production_end_time,'yyyymmddhhmiss') as production_end_time
+          ,row_number() over (partition by t.product_no,to_char(t.production_end_time,'yyyymmdd') order by t.production_end_time asc) as rn
+        from
+        (
+          select stf.product_no,stf.production_end_time
+          from popopiedc.ods_bamboo_bamboo_pd_spu_test_form stf
+          inner join popopiedc.ods_bamboo_bamboo_common_dictionary   bcd
+          on (stf.production_status = bcd.value and bcd.group_identification = 'productTestSubStatus')
+          where bcd.name ='生产测试通过'
+          union all
+          select a.oldno as product_no,a.testspuproducetime as production_end_time
+          from ods_erp_erp_product_presale_follow a
+          where 1= 1 and a.pt = '${date}' and a.testresult = 2
+        ) t
+    ) a
+    where a.product_no in (select product_no from popopiedc.dim_spu)
+) t
+where t.rn =1
+;
+
+--select a.product_no,a.production_end_time from @product_test a group by a.product_no,a.production_end_time having count(1)>1;
+
+-- 每天取首次入库记录
+-- 入库记录  ods_ferp_scm_purchase_delivery_detail
+@product_stock_in:=
+select
+   to.product_no
+  ,to.in_time
+  ,to.in_date
+from
+(
+    select
+       tn.product_no
+      ,tn.in_time
+      ,tn.in_date
+      ,row_number() over (partition by tn.product_no,tn.in_date order by tn.in_time asc) as rn
+    from
+    (
+      select
+           t1.old_no as product_no
+          ,to_char(t.intime,'yyyymmddhhmiss') as in_time
+          ,to_char(t.intime,'yyyymmdd') as in_date
+      from ods_erp_erp_stock_goodsin t
+      inner join ods_erp_erp_product_spu t1
+      on (t.spuid = t1.id and t1.pt = '${date}')
+      where t.pt = '${date}'
+      union all
+      select
+           pdd.spu as product_no
+          ,to_char(pdd.instorage_time,'yyyymmddhhmiss') as in_time
+          ,to_char(pdd.instorage_time,'yyyymmddhh') as in_date
+      from opdc.ods_ferp_scm_purchase_delivery_detail pdd
+      left semi join opdc.dim_spu ds
+      on (pdd.spu = ds.product_no)
+      where pdd.instorage_time is not null
+      union all
+      select
+           pdd.spu as product_no
+          ,to_char(pdd.instorage_time,'yyyymmddhhmiss') as in_time
+          ,to_char(pdd.instorage_time,'yyyymmddhh') as in_date
+      from popopiedc.ods_ferp_scm_purchase_delivery_detail pdd
+      left semi join popopiedc.dim_spu ds
+      on (pdd.spu = ds.product_no)
+      where pdd.instorage_time is not null
+    ) tn
+) to
+where to.rn = 1
+;
+-- 20211011    20211021
+-- 20211011    20211022
+-- 20211014    20211022      20211011 20211021    20211014  20210122
+
+--20211011  20211018  20211012 20211019  20211022 20211025
+
+-- 获取测试成功最近的一次入库日期
+@product_test_in_pre:=
+select
+   t.product_no
+  ,t.production_end_time as start_time
+  ,t.in_time as end_time
+from
+(
+    select
+     a.product_no
+    ,a.production_end_time
+    ,b.in_time
+    ,row_number() over (partition by a.product_no,a.production_end_time order by b.in_time asc) as rn
+  from @product_test a
+  inner join @product_stock_in b
+  on (a.product_no = b.product_no  and a.production_end_time<=b.in_time)
+) t
+where t.rn =1
+;
+
+@product_test_in_pre_1:=
+select
+  tip.product_no
+ ,tip.start_time
+ ,tip.end_time
+ ,max(tip.end_time) over (partition by tip.product_no order by tip.start_time asc rows between unbounded preceding and 1 preceding) as max_end_time
+from @product_test_in_pre tip
+;
+--SP2108201CMU
+-- 前闭后开
+insert overwrite table dws_product_test_in_date_info partition (pt = '${date}')
+select
+   a.product_no
+  ,b.start_time
+  ,b.end_time
+  ,a.is_standard
+  ,a.purchase_price
+from
+(
+  select a.product_no,if(a.stock_logistics_attribute='1','0','1') as is_standard,
+  nvl(coalesce(a.avg_purchase_price,a.supply_price,purchase_guide_max_price,purchase_guide_min_price),0) as purchase_price,
+  row_number() over (partition by a.product_no order by if(a.system rlike 'LMS',1,0) desc) as rn
+  from opdc.dim_spu a
+  union all
+  select a.product_no,if(a.stock_logistics_attribute='1','0','1') as is_standard,
+  row_number() over (partition by a.product_no order by if(a.system rlike 'LMS',1,0) desc) as rn,
+  nvl(coalesce(a.avg_purchase_price,a.supply_price,purchase_guide_max_price,purchase_guide_min_price),0) as purchase_price
+  from popopiedc.dim_spu a
+) a
+left join
+(
+    select
+      tip1.product_no
+     ,if(max_end_time is null,start_time,if(start_time>max_end_time,start_time,max_end_time)) start_time
+     ,tip1.end_time
+    from @product_test_in_pre_1 tip1
+) b
+on (a.product_no = b.product_no)
+where a.rn = 1
+;
+
+
+
+--select a.product_no,a.start_time from dws_product_test_in_date_info a where a.pt = '20211215' group by a.product_no,a.start_time having count(1)>1;

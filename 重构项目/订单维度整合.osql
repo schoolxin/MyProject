@@ -1,0 +1,8 @@
+--name:订单维度整合
+--author:order
+--create time:2021-11-01 11:12
+--现货采购SKU明细：dw_pms_stockgoods_purchase
+--生产采购SKU明细：dw_pom_purchase
+-- dwd_order_sales_process  订单明细表
+
+

@@ -1,0 +1,442 @@
+--name:app_looklook_every_month_cleared_goods_info_oms
+--author:order
+--create time:2021-11-23 19:35
+
+-- 清仓开始
+@cleared_info_pre:=
+select
+    nvl(osp.erp_order_id,osp.order_id) as order_id
+   ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+   ,osp.addtime as order_time
+   ,osp.spu_no
+from opdc.dwd_order_sales_process osp
+where (osp.change_type in ('下单') or (osp.change_details_type = '替换上' and osp.change_type = '换货'))
+group by
+    nvl(osp.erp_order_id,osp.order_id)
+   ,nvl(osp.sku_erp_id,osp.sku_id)
+   ,osp.addtime
+   ,osp.spu_no
+union all
+select
+    nvl(osp.erp_order_id,osp.order_id) as order_id
+   ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+   ,osp.addtime as order_time
+   ,osp.spu_no
+from popopiedc.dwd_order_sales_process osp
+where (osp.change_type in ('下单') or (osp.change_details_type = '替换上' and osp.change_type = '换货'))
+group by
+    nvl(osp.erp_order_id,osp.order_id)
+   ,nvl(osp.sku_erp_id,osp.sku_id)
+   ,osp.addtime
+   ,osp.spu_no
+;
+
+@cleared_info:=
+select
+  t.order_id,
+  t.sku_id as sku_id,
+  t.if_cleared,
+  t.order_time
+from
+(
+  select
+    osp.order_id as order_id,
+    osp.sku_id,
+    substring(t3.start_clear_time,1,8) as cleared_date,
+    case when to_char(osp.order_time,'yyyymmddhhmiss')>=nvl(t3.start_clear_time,'99991231235959') and to_char(osp.order_time,'yyyymmddhhmiss') <= nvl(t3.end_clear_time,'99991231235959') then 'cleared'
+        else 'un_cleared'
+    end if_cleared,
+    t3.start_clear_time,
+    t3.end_clear_time,
+    to_char(osp.order_time,'yyyymmddhhmiss') as order_time
+  from @cleared_info_pre osp
+  left join dws_product_clear_tag_info t3
+  on (osp.sku_id=t3.sku_id and t3.pt='${date}' and t3.start_clear_time<=to_char(osp.order_time,'yyyymmddhhmiss'))
+  where 1=1
+--  and osp.spu_no = 'SP10DI0J1RH'
+) t
+where t.if_cleared = 'cleared'
+group by
+  t.order_id,
+  t.sku_id,
+  t.if_cleared,
+  t.order_time
+;
+-- 清仓收入
+@order_goods_sale_info:=
+select
+   ooa.site_id
+  ,osp.order_no
+  ,nvl(osp.erp_order_id,osp.order_id) as order_id
+  ,osp.order_amt
+  ,nvl(osp.sku_erp_id,osp.sku_id) as sku_id
+  ,sum(abs(osp.good_price_currency)*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as good_price_currency -- 订单物品总金额
+  ,sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,to_char(osp.paytime,'yyyymmdd') as pay_date
+  ,osp.erp_order_id
+from
+(
+  select * from opdc.dwd_order_sales_process osp where to_char(osp.paytime,'yyyymmdd')>='20211101'
+  union all
+  select * from popopiedc.dwd_order_sales_process osp where to_char(osp.paytime,'yyyymmdd')>='20211101'
+
+) osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+  union all
+  select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where (osp.change_type in ('下单') or (osp.change_details_type = '替换上' and osp.change_type = '换货') or (change_details_type = '原单商品取消' and change_type = '取消'))
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,osp.currency_name
+  ,nvl(osp.sku_erp_id,osp.sku_id)
+  ,to_char(osp.paytime,'yyyymmdd')
+  ,osp.erp_order_id
+;
+
+@weight_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.good_price_currency -- 订单物品总金额
+    ,t.current_sku_qty -- 订单物品总数量
+    ,t.currency_name
+    ,t.pay_date
+    ,t.erp_order_id
+    ,sum(t.current_sku_qty) over (partition by t.order_id ) as sum_counts
+    ,sum(t.good_price_currency) over (partition by t.order_id ) as sum_amount
+from
+(
+  select
+     gsi.site_id
+    ,gsi.order_no
+    ,gsi.order_id
+    ,gsi.order_amt
+    ,gsi.sku_id
+    ,gsi.good_price_currency -- 订单物品总金额
+    ,gsi.current_sku_qty -- 订单物品总数量
+    ,gsi.currency_name
+    ,gsi.pay_date
+    ,gsi.erp_order_id
+  from @order_goods_sale_info gsi
+) t
+;
+
+@price_rate_oms:=
+select
+     wp.site_id
+    ,wp.order_no
+    ,wp.order_id
+    ,wp.order_amt
+    ,wp.sku_id
+    ,wp.good_price_currency -- 订单物品总金额
+    ,wp.current_sku_qty -- 订单物品总数量
+    ,wp.currency_name
+    ,wp.sum_counts
+    ,wp.sum_amount
+    ,case when wp.sum_amount<> 0 then wp.good_price_currency/wp.sum_amount
+          when wp.sum_counts= 0 then 0
+          else current_sku_qty/sum_counts
+     end as price_rate
+    ,wp.pay_date
+    ,wp.erp_order_id
+from @weight_price_oms wp
+;
+
+@erp_order_order:=
+select
+     distinct
+     meoi.erp_site_id as site_id,
+     meoi.erp_order_id as order_id,
+     meoi.site_order_id as site_order_id,
+     meoi.site_id as ops_site_id,
+     meoi.site_name as ops_site_name
+from dwd_mapping_erp_order_id meoi
+where meoi.pt = '${date}'
+;
+
+@goods_pre_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_id
+    ,t.good_price_currency -- 订单物品总金额
+    ,t.current_sku_qty -- 订单物品总数量
+    ,t.currency_name
+    ,t.sum_counts
+    ,t.sum_amount
+    ,t.price_rate
+    ,t.order_amt*t.price_rate as pre_price
+    ,t.pay_date
+    ,t.erp_order_id
+from @price_rate_oms t
+inner join @cleared_info ci
+on (t.sku_id = ci.sku_id and t.order_id = ci.order_id)
+;
+
+
+--清仓start
+@month_rate_cleared:=
+select
+       t3.ops_site_name
+      ,t3.ops_site_id
+      ,substring(t3.data_dt,1,6) as date_month
+      ,sum(t3.logistics_cost_cny) / sum(t3.gmv_cny) as logistics_cost_rate_month
+      ,sum(t3.purchase_cost_cny) / sum(t3.gmv_cny) as purchase_cost_rate_month
+      ,sum(t3.purchase_cost_original_cny) / sum(t3.gmv_cny) as purchase_cost_rate_month_original
+      ,sum(t3.purchase_cost_original_cny) as purchase_cost_original
+from app_looklook_daily_logistics_cost_oms t3
+where t3.pt='${date}' and t3.rate_type = 'cleared_rate'
+group by t3.ops_site_name,t3.ops_site_id,substring(t3.data_dt,1,6)
+having sum(t3.gmv_cny)!=0;
+
+@month_rate_cleared_org:=
+select
+       substring(t3.data_dt,1,6) as date_month
+      ,sum(t3.logistics_cost_cny) / sum(t3.gmv_cny) as logistics_cost_rate_month
+      ,sum(t3.purchase_cost_cny) / sum(t3.gmv_cny) as purchase_cost_rate_month
+      ,sum(t3.purchase_cost_original_cny) / sum(t3.gmv_cny) as purchase_cost_rate_month_original
+      ,sum(t3.purchase_cost_original_cny) as purchase_cost_original
+from app_looklook_daily_logistics_cost_oms t3
+where t3.pt='${date}' and t3.rate_type = 'cleared_rate'
+group by substring(t3.data_dt,1,6)
+having sum(t3.gmv_cny)!=0;
+
+
+--select
+-- a.*,
+-- cct.currency_transform_cny
+--from @goods_pre_price_oms a
+--inner join @erp_order_order b
+--on (a.site_id = b.site_id and a.order_id = b.order_id)
+--inner join dwd_com_site_org_info c
+--on (b.ops_site_id = c.site_id and b.ops_site_name = c.site_name and c.pt = '${date}')
+--left join dwd_com_currency_transform cct
+--on (a.pay_date = cct.data_dt and upper(a.currency_name) = cct.currency_code and cct.pt='${date}')
+--where c.business_unit_name = 'USD事业部' and substring(a.pay_date,1,6) = '202111';
+
+
+@cleared_gmv:=
+select
+  b.ops_site_id,
+  b.ops_site_name,
+  substring(a.pay_date,1,6) as date_month,
+  sum(a.pre_price*cct.currency_transform_cny) as cleared_gmv_cny,
+  sum(a.pre_price*cct.currency_transform) as cleared_gmv_usd
+from @goods_pre_price_oms a
+inner join @erp_order_order b
+on (a.site_id = b.site_id and a.order_id = b.order_id)
+left join dwd_com_currency_transform cct
+on (a.pay_date = cct.data_dt and upper(a.currency_name) = cct.currency_code and cct.pt='${date}')
+--where a.pay_date = '20211120'
+group by
+  b.ops_site_id,
+  b.ops_site_name,
+  substring(a.pay_date,1,6)
+;
+
+@cleared_report:=
+select
+    nvl(a.ops_site_id,0) as site_id,
+    nvl(a.ops_site_name,'other') as  site_name,
+    nvl(d.business_unit_name,'other') as business_unit_name,
+    a.date_month,
+    sum(a.cleared_gmv_cny) as cleared_gmv_cny,
+    sum(a.cleared_gmv_cny*nvl(c.purchase_cost_rate_month,c1.purchase_cost_rate_month)) as cleared_purchase_cost,
+    sum(a.cleared_gmv_cny*nvl(c.logistics_cost_rate_month,c1.logistics_cost_rate_month)) as cleared_logistics_cost,
+    sum(a.cleared_gmv_cny*nvl(c.purchase_cost_rate_month_original,c1.purchase_cost_rate_month_original)) as cleared_purchase_cost_original
+from @cleared_gmv a
+left join @month_rate_cleared c
+on (a.ops_site_name = c.ops_site_name and a.ops_site_id = c.ops_site_id and a.date_month = c.date_month)
+left join @month_rate_cleared_org c1
+on (a.date_month = c1.date_month)
+left join  dwd_com_site_org_info d
+on (a.ops_site_id = d.site_id and a.ops_site_name = d.site_name and d.pt = '${date}')
+group by
+     nvl(a.ops_site_id,0)
+    ,nvl(a.ops_site_name,'other')
+    ,a.date_month
+    ,nvl(d.business_unit_name,'other')
+;
+---清仓end
+
+--总start
+@month_rate:=
+select
+       t3.ops_site_name
+      ,t3.ops_site_id
+      ,substring(t3.data_dt,1,6) as date_month
+      ,sum(t3.logistics_cost_cny) / sum(t3.gmv_cny) as logistics_cost_rate_month
+      ,sum(t3.purchase_cost_cny) / sum(t3.gmv_cny) as purchase_cost_rate_month
+      ,sum(t3.gmv_cny) as gmv_cny
+      ,sum(t3.logistics_cost_cny) as logistics_cost
+      ,sum(t3.purchase_cost_cny) as purchase_cost
+      ,sum(t3.purchase_cost_original_cny) / sum(t3.gmv_cny) as purchase_cost_rate_month_original
+      ,sum(t3.purchase_cost_original_cny) as purchase_cost_original
+from app_looklook_daily_logistics_cost_oms t3
+where t3.pt='${date}' and t3.rate_type = 'total_rate'
+group by t3.ops_site_name,t3.ops_site_id,substring(t3.data_dt,1,6)
+having sum(t3.gmv_cny)!=0;
+
+@month_rate_org:=
+select
+       substring(t3.data_dt,1,6) as date_month
+      ,sum(t3.logistics_cost_cny) / sum(t3.gmv_cny) as logistics_cost_rate_month
+      ,sum(t3.purchase_cost_cny) / sum(t3.gmv_cny) as purchase_cost_rate_month
+      ,sum(t3.gmv_cny) as gmv_cny
+      ,sum(t3.logistics_cost_cny) as logistics_cost
+      ,sum(t3.purchase_cost_cny) as purchase_cost
+      ,sum(t3.purchase_cost_original_cny) / sum(t3.gmv_cny) as purchase_cost_rate_month_original
+      ,sum(t3.purchase_cost_original_cny) as purchase_cost_original
+from app_looklook_daily_logistics_cost_oms t3
+where t3.pt='${date}' and t3.rate_type = 'total_rate'
+group by substring(t3.data_dt,1,6)
+having sum(t3.gmv_cny)!=0;
+
+@allapytype_trnas:=
+select *
+from app_looklook_daily_allpaytype_tran_info ati
+where ati.currency_code = '各币种汇总-USD' and ati.pt='${date}';
+-- 每日gmv计算
+@gmv_daily:=
+select
+     substring(ati.trans_date,1,6) as date_month
+    ,ati.site_id
+    ,lower(ati.site_name) as site_name
+    ,ati.business_unit_name
+    ,sum((revenue-revenue_swipe)*nvl(cct.currency_transform_cny,0)) as gmv_amount_cny -- 剔除刷单的收入20210316
+    ,sum((revenue-revenue_swipe)) as gmv_amount_usd -- 剔除刷单的收入20210316
+from @allapytype_trnas ati
+left join dwd_com_currency_transform  cct on (ati.trans_date=cct.data_dt and cct.currency_code='USD' and cct.pt='${date}')
+group by
+     substring(ati.trans_date,1,6)
+    ,ati.site_id
+    ,lower(ati.site_name)
+    ,ati.business_unit_name;
+-- 总报表
+@total_report:=
+select
+     a.business_unit_name,
+     nvl(a.site_id,0) as site_id,
+     nvl(a.site_name,'other') as site_name,
+     sum(a.gmv_amount_cny) as gmv_amount_cny,
+     sum(a.gmv_amount_cny*nvl(b.logistics_cost_rate_month,c.logistics_cost_rate_month)) as logistics_cost,
+     sum(a.gmv_amount_cny*nvl(b.purchase_cost_rate_month,c.purchase_cost_rate_month)) as purchase_cost,
+     a.date_month,
+     sum(a.gmv_amount_cny*nvl(b.purchase_cost_rate_month_original,c.purchase_cost_rate_month_original)) as purchase_cost_original
+from @gmv_daily a
+left join @month_rate b
+on (a.site_id=b.ops_site_id and a.site_name = b.ops_site_name and b.date_month = a.date_month)
+left join @month_rate_org c
+on (a.date_month = c.date_month)
+--where a.date_month = '201911'
+group by
+     a.business_unit_name,
+     nvl(a.site_id,0),
+     nvl(a.site_name,'other'),
+     a.date_month
+;
+
+--非清仓报表 start
+@month_rate_uncleared:=
+select
+       t3.ops_site_name
+      ,t3.ops_site_id
+      ,substring(t3.data_dt,1,6) as date_month
+      ,sum(t3.logistics_cost_cny) / sum(t3.gmv_cny) as logistics_cost_rate_month
+      ,sum(t3.purchase_cost_cny) / sum(t3.gmv_cny) as purchase_cost_rate_month
+      ,sum(t3.gmv_cny) as gmv_cny
+      ,sum(t3.logistics_cost_cny) as logistics_cost
+      ,sum(t3.purchase_cost_cny) as purchase_cost
+      ,sum(t3.purchase_cost_original_cny) / sum(t3.gmv_cny) as purchase_cost_rate_month_original
+      ,sum(t3.purchase_cost_original_cny) as purchase_cost_original
+from app_looklook_daily_logistics_cost_oms t3
+where t3.pt='${date}' and t3.rate_type = 'uncleared_rate'
+--and substring(t3.data_dt,1,6)='201911'
+group by t3.ops_site_name,t3.ops_site_id,substring(t3.data_dt,1,6)
+having sum(t3.gmv_cny)!=0;
+
+@month_rate_uncleared_org:=
+select
+       substring(t3.data_dt,1,6) as date_month
+      ,sum(t3.logistics_cost_cny) / sum(t3.gmv_cny) as logistics_cost_rate_month
+      ,sum(t3.purchase_cost_cny) / sum(t3.gmv_cny) as purchase_cost_rate_month
+      ,sum(t3.gmv_cny) as gmv_cny
+      ,sum(t3.logistics_cost_cny) as logistics_cost
+      ,sum(t3.purchase_cost_cny) as purchase_cost
+      ,sum(t3.purchase_cost_original_cny) / sum(t3.gmv_cny) as purchase_cost_rate_month_original
+      ,sum(t3.purchase_cost_original_cny) as purchase_cost_original
+from app_looklook_daily_logistics_cost_oms t3
+where t3.pt='${date}' and t3.rate_type = 'uncleared_rate'
+--and substring(t3.data_dt,1,6)='201911'
+group by substring(t3.data_dt,1,6)
+having sum(t3.gmv_cny)!=0;
+
+@uncleared_report:=
+select
+      a.site_id,
+      a.site_name,
+      a.date_month,
+      a.business_unit_name,
+      a.gmv_amount_cny-nvl(b.cleared_gmv_cny,0) as uncleared_gmv_cny,
+      (a.gmv_amount_cny-nvl(b.cleared_gmv_cny,0)) * nvl(c.logistics_cost_rate_month,c1.logistics_cost_rate_month) as uncleared_logistics_cost,
+      (a.gmv_amount_cny-nvl(b.cleared_gmv_cny,0)) * nvl(c.purchase_cost_rate_month,c1.purchase_cost_rate_month) as uncleared_purchase_cost,
+      (a.gmv_amount_cny-nvl(b.cleared_gmv_cny,0)) * nvl(c.purchase_cost_rate_month_original,c1.purchase_cost_rate_month_original) as uncleared_purchase_cost_original
+from @total_report a
+left join @cleared_report b
+on (a.date_month=b.date_month and a.site_name=b.site_name and a.site_id=b.site_id)
+left join @month_rate_uncleared c
+on (a.site_id=c.ops_site_id and a.site_name = c.ops_site_name and a.date_month = c.date_month)
+left join @month_rate_uncleared_org c1
+on (a.date_month = c1.date_month)
+;
+
+insert overwrite table app_looklook_every_month_cleared_goods_info_oms partition (pt='${date}',report_type='total')
+select
+       a.date_month ,
+       a.business_unit_name ,
+       a.site_id ,
+       a.site_name ,
+       a.gmv_amount_cny ,
+       a.logistics_cost ,
+       a.purchase_cost,
+       a.purchase_cost_original
+from @total_report a
+;
+
+insert overwrite table app_looklook_every_month_cleared_goods_info_oms partition (pt='${date}',report_type='cleared')
+select
+       a.date_month ,
+       a.business_unit_name ,
+       a.site_id ,
+       a.site_name ,
+       a.cleared_gmv_cny ,
+       a.cleared_logistics_cost ,
+       a.cleared_purchase_cost,
+       a.cleared_purchase_cost_original
+from @cleared_report a
+;
+
+insert overwrite table app_looklook_every_month_cleared_goods_info_oms partition (pt='${date}',report_type='uncleared')
+select
+       a.date_month ,
+       a.business_unit_name ,
+       a.site_id ,
+       a.site_name ,
+       a.uncleared_gmv_cny ,
+       a.uncleared_logistics_cost ,
+       a.uncleared_purchase_cost,
+       a.uncleared_purchase_cost_original
+from @uncleared_report a
+;

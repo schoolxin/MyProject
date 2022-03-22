@@ -1,0 +1,129 @@
+--name:app_looklook_daily_site_prodcut_locked
+--author:order
+--create time:2021-11-10 16:22
+@order_goods_sale_info:=
+select
+    osp.erp_order_id
+   ,osp.order_id
+   ,osp.order_no
+   ,ooa.site_id
+   ,sku_erp_id
+   ,to_char(osp.addtime,'yyyymmdd') as order_date
+   ,sum(osp.sales_qty) as sku_total_cnt
+--   ,collect_set(osp.sku_erp_id) over (partition by osp.order_id) as cnt
+from opdc.dwd_order_sales_process osp
+inner join (
+  select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where to_char(osp.addtime,'yyyymmdd')>='20211109' and osp.change_type = '下单'
+group by
+    osp.erp_order_id
+   ,osp.order_id
+   ,osp.order_no
+   ,ooa.site_id
+   ,sku_erp_id
+   ,to_char(osp.addtime,'yyyymmdd')
+;
+
+@order_goods_detail_oms:=
+select
+  gsi.order_no
+ ,gsi.site_id
+ ,gsi.order_date
+ ,gsi.sku_erp_id
+ ,gsi.sku_total_cnt
+ ,si.lock_inventory_qty
+ ,gsi.erp_order_id
+from @order_goods_sale_info gsi
+left join
+(
+  select si.sku,si.order_id,si.goods_lock_tm,si.lock_inventory_qty,row_number() over (partition by si.order_id,si.sku order by si.goods_lock_tm)  as rn
+  from opdc.dw_logistics_sku_inventory si
+  where si.lock_type = '锁库'
+) si
+on (gsi.erp_order_id = si.order_id and gsi.sku_erp_id = si.sku and si.rn = 1)
+;
+-- erp跟ops的映射关系
+@mapping_erp_site_info:=
+select  a.site_name,
+        a.site_id,
+        case when b.site_type_id = 4 then a.cod_erp_site_id else a.erp_site_id end as erp_site_id
+from dwd_mapping_erp_site_id a
+join ods_looklook_looklook_tb_site b
+on (a.site_id = b.id and b.pt='${date}')
+where a.pt='${date}'
+;
+-- 换货
+@orderexchange:=
+select
+  t.order_id,t.order_goods_id
+from
+(
+  select trans_array(1,',',orderid,ordergoodsids) as (order_id,order_goods_id)
+  from ods_erp_erp_order_orderexchange tt
+  where tt.pt = '${date}'
+) t
+group by t.order_id,t.order_goods_id
+;
+@order_goods_detail:=
+select
+ oog.order_id,
+ oog.id as order_goods_id,
+ oog.create_date,
+ oo.status,
+ oo.erpstatus,
+ oo.verify_tag,
+ oog.goods_status,
+ glr.stock_goods_id,
+ glr.create_time as lock_date,
+ oog.is_delivery,
+ oo.site_id,
+ to_char(oo.create_time,'yyyymmdd') as order_date
+from ods_erp_erp_order_order oo
+inner join (
+  select oog.id,oog.order_id,to_char(oog.create_time,'yyyymmdd') as create_date,oog.status as goods_status,oog.is_delivery
+  from ods_erp_erp_order_order_goods oog
+  left anti join @orderexchange ox
+  on (oog.id = ox.order_goods_id and oog.order_id = ox.order_id)
+  where oog.pt = '${date}'
+) oog
+on (oo.id = oog.order_id and to_char(oo.create_time,'yyyymmdd') = oog.create_date)
+left join (
+      select b.*,row_number() over (partition by b.order_goods_id order by b.create_time desc)  as rn
+      from ods_erp_erp_order_goods_lock_relation b where b.pt = '${date}' and b.is_delete = 0
+    ) glr
+on glr.order_goods_id = oog.id and to_char(glr.create_time,'yyyymmdd') = oog.create_date
+where oo.pt = '${date}' and to_char(oo.create_time,'yyyymmdd') = '${date}'
+;
+insert overwrite table app_looklook_daily_site_prodcut_locked partition(dt)
+select
+ a.site_id as erp_site_id,
+ bigint(b.site_id) as site_id,
+ b.site_name,
+ count(distinct a.order_goods_id) as total_proudct_count,
+ count(distinct case when a.lock_date is not null then a.order_goods_id end) as locked_product_count,
+ a.order_date as data_dt
+from @order_goods_detail a
+inner join @mapping_erp_site_info b
+on (a.site_id = b.erp_site_id)
+where a.order_date<'20211101'
+group by a.site_id,b.site_id,b.site_name,a.order_date
+union all
+select
+   bigint(gdo.site_id) as erp_site_id
+  ,bigint(b.site_id) as site_id
+  ,b.site_name
+  ,sum(gdo.sku_total_cnt) as total_proudct_count
+  ,sum(nvl(gdo.lock_inventory_qty,0)) as locked_product_count
+  ,gdo.order_date
+from @order_goods_detail_oms gdo
+inner join @mapping_erp_site_info b
+on (gdo.site_id = b.erp_site_id)
+where gdo.order_date>='20211101'
+group by
+   gdo.site_id
+  ,gdo.order_date
+  ,bigint(b.site_id)
+  ,b.site_name
+;

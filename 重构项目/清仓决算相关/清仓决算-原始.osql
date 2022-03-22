@@ -1,0 +1,366 @@
+---是否为清仓产品
+@cleared_info:=
+select
+     distinct
+     t2.order_id,
+     t1.site_id,
+     t2.sku_id,
+     to_char(t3.start_clear_time,'yyyymmdd') as cleared_date,
+     case when to_char(t1.add_time,'yyyymmddhhmiss')>=nvl(to_char(t3.start_clear_time,'yyyymmddhhmiss'),'99991231') and to_char(t1.add_time,'yyyymmddhhmiss') <= nvl(to_char(t3.end_clear_time,'yyyymmddhhmiss'),'99991231') then 'cleared'
+          else 'un_cleared'
+     end if_cleared
+from ods_erp_erp_order_order t1
+join ods_erp_erp_order_order_goods t2
+on t1.id = t2.order_id and t2.pt=max_pt('ods_erp_erp_order_order_goods')
+left join ods_erp_erp_stock_clear_stock t3
+on (t2.sku_id=t3.sku_id and t3.pt='${date}')
+where t1.pt = '${date}';
+
+@erp_order_order:=
+select
+       distinct
+       eoo.site_id,
+       eoo.id,
+       meoi.site_order_id as site_order_id
+from ods_erp_erp_order_order eoo
+join dwd_mapping_erp_order_id meoi
+on (eoo.site_id = meoi.erp_site_id and eoo.id = meoi.erp_order_id and meoi.pt=max_pt('dwd_mapping_erp_order_id'))
+where eoo.pt = '${date}';
+
+--订单信息
+@order:=
+select
+   t.id as site_order_id
+  ,t.currency_code
+  ,t.total_amount
+  ,t.site_id
+  ,t.shipping_amount
+from dwd_looklook_shopify_order_info t
+where t.pt='${date}' and t.total_amount !=0  and t.order_date <= to_date('${date}','yyyymmdd')
+--      and to_char(t.order_date,'yyyymm') ='201911'
+union all
+select
+   string(t.id) as site_order_id
+  ,t.currency_code
+  ,t.total_amount
+  ,t.site_id
+  ,t.shipping_amount
+from dwd_looklook_cloud_order_info t
+where t.pt='${date}' and t.total_amount !=0  and t.order_date <= to_date('${date}','yyyymmdd') and t.special_sign=0 --只算非刷单的数据
+union all
+select
+   t.order_sn as site_order_id
+  ,t.currency_code
+  ,t.total_amount
+  ,t.site_id
+  ,t.shipping_amount
+from dwd_looklook_spsite_order_info t
+where t.pt='${date}' and t.total_amount !=0  and t.order_date <= to_date('${date}','yyyymmdd')
+group by  t.order_sn,t.currency_code,t.total_amount,t.site_id,t.shipping_amount
+union all
+select
+   t.id as site_order_id
+  ,t.currency_code
+  ,t.total_amount
+  ,t.site_id
+  ,t.shipping_amount
+from dwd_looklook_shoplazza_order_info t
+where t.pt='${date}' and t.total_amount !=0  and t.order_date <= to_date('${date}','yyyymmdd')
+union all
+select
+   string(t.id) as site_order_id
+  ,t.currency_code
+  ,t.total_amount
+  ,t.site_id
+  ,t.shipping_amount
+from dwd_looklook_self_site_order_info t
+where t.pt='${date}' and t.total_amount !=0  and to_char(t.order_date,'yyyymmdd')>='20210401' and to_char(t.order_date,'yyyymmdd')<='${date}'
+union all
+select
+   t.id as site_order_id
+  ,t.currency_code
+  ,t.total_amount
+  ,t.site_id
+  ,t.shipping_amount
+from dwd_looklook_woocommerce_order_info t
+where t.pt='${date}' and t.total_amount !=0  and to_char(t.order_date,'yyyymmdd')>='20210401' and to_char(t.order_date,'yyyymmdd')<='${date}'
+;
+
+@erp_order_goods:=
+  select t.id
+  ,t.order_id
+  ,eoo.site_id
+  ,if(t.currency_price=0,currency_price,t.price*eoo.currency_rate) as price
+  ,eoo.discount_price
+  ,ld.express_no
+  ,ld.company_id
+  ,t.sku_id
+  ,sum(if(t.currency_price=0,currency_price,t.price*eoo.currency_rate)) over (partition by t.order_id,eoo.site_id )as total_price --商品总价
+  ,count(1) over (partition by t.order_id,eoo.site_id )as order_product_count -- 订单商品数量
+  ,sum(case when ldd.sku_id is not null then 1 else 0 end) over (partition by t.order_id,eoo.site_id,ld.express_no)as delivery_product_count -- 包裹商品数量
+from ods_erp_erp_order_order eoo
+join ods_erp_erp_order_order_goods t
+on ( eoo.id = t.order_id and t.pt=max_pt('ods_erp_erp_order_order_goods'))
+left join (select ldd.*,row_number() over (partition by ldd.bill_id order by ldd.create_time desc) as rns from ods_erp_erp_logistics_delivery_detail ldd where ldd.pt = '${date}') ldd
+on (ldd.bill_id = t.id  and  ldd.rns = 1)
+left join
+(
+  select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+  from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+  --and ld.delivery_status = 1
+) ld
+on (ldd.delivery_id=ld.id and ld.rn = 1)
+where eoo.pt = '${date}';
+--     and eoo.add_time <= to_date('${date}','yyyymmdd')
+--     and to_char(eoo.add_time,'yyyymm') ='201911' ;
+
+@goods_actual_price:=
+select  ord.site_order_id
+  ,orgs.order_id
+  ,ord.currency_code
+  ,orgs.id as order_googs_id
+  ,meoi.erp_site_id
+  ,meoi.erp_site_name
+  ,meoi.site_id
+  ,meoi.site_name
+  ,ord.shipping_amount
+  ,ord.total_amount
+  ,orgs.express_no
+  ,orgs.company_id
+  ,orgs.price
+  ,orgs.total_price
+  ,orgs.sku_id
+  ,case when orgs.total_price = 0 then 0
+        else (ord.total_amount - nvl(ord.shipping_amount,0))*(orgs.price/orgs.total_price)
+   end as actual_price
+  ,order_product_count
+  ,delivery_product_count
+  ,(delivery_product_count/order_product_count)*ord.shipping_amount as avg_shipping_amount
+from @order ord
+join dwd_mapping_erp_order_id meoi
+on (ord.site_id = meoi.site_id and ord.site_order_id = meoi.site_order_id and meoi.pt=max_pt('dwd_mapping_erp_order_id'))
+inner  join  @erp_order_goods orgs
+on (orgs.site_id = meoi.erp_site_id and orgs.order_id = meoi.erp_order_id)
+;
+
+
+@delivery_order_gmv:=
+select
+      site_order_id,
+      a.order_id,
+      currency_code,
+      erp_site_id,
+      erp_site_name,
+      a.site_id,
+      site_name,
+      express_no,
+      company_id,
+      a.sku_id,
+      actual_price,
+      nvl(avg_shipping_amount,0) as avg_shipping_amount,
+      sum(a.actual_price) over (partition by erp_site_id,a.order_id,a.express_no) as total_gmv,
+      sum(case when nvl(b.if_cleared,'un_cleared') = 'cleared' then a.actual_price else 0 end) over (partition by erp_site_id,a.order_id,a.express_no) as cleared_gmv,
+      sum(case when nvl(b.if_cleared,'un_cleared') = 'un_cleared' then a.actual_price else 0 end) over (partition by erp_site_id,a.order_id,a.express_no) as un_cleared_gmv,
+      sum(case when nvl(b.if_cleared,'un_cleared') = 'cleared' then 1 else 0 end) over (partition by erp_site_id,a.order_id,a.express_no) as cleared_proudct_count,
+      sum(case when nvl(b.if_cleared,'un_cleared') = 'un_cleared' then 1 else 0 end) over (partition by erp_site_id,a.order_id,a.express_no) as uncleared_proudct_count,
+      row_number() over  (partition by erp_site_id,a.order_id,express_no) as rn
+from @goods_actual_price a
+left join @cleared_info b
+on (b.order_id=a.order_id and a.sku_id=b.sku_id)
+where a.express_no is not null;
+
+@delivery_order_gmv_shipping:=
+select
+      site_order_id,
+      order_id,
+      currency_code,
+      erp_site_id,
+      erp_site_name,
+      site_id,
+      site_name,
+      express_no,
+      company_id,
+      sku_id,
+      actual_price,
+      avg_shipping_amount*(cleared_proudct_count/(cleared_proudct_count+uncleared_proudct_count)) as cleared_product_shipping_amount,
+      avg_shipping_amount*(uncleared_proudct_count/(cleared_proudct_count+uncleared_proudct_count)) as uncleared_product_shipping_amount,
+      cleared_gmv,
+      un_cleared_gmv,
+      total_gmv,
+      avg_shipping_amount,
+      a.rn
+from @delivery_order_gmv a
+;
+
+@gmv_final:=
+select
+      site_order_id,
+      order_id,
+      currency_code,
+      erp_site_id,
+      erp_site_name,
+      site_id,
+      site_name,
+      express_no,
+      company_id,
+      sku_id,
+      actual_price,
+      total_gmv+avg_shipping_amount as total_gmv,
+      cleared_gmv+cleared_product_shipping_amount as cleared_gmv,
+      un_cleared_gmv+uncleared_product_shipping_amount as uncleared_gmv,
+      a.rn
+from @delivery_order_gmv_shipping a
+
+;
+--select *from @gmv_final a where a.express_no in ('4200244592748927005430000004345246','4006318170579779','4006318170577508','LO534796825CN','00340434299503057134');
+--采购成本deng
+@purchase_cost:=
+select
+   oo.site_id
+  ,oo.site_order_id
+  ,oo.id
+  ,ld.express_no
+  ,ld.company_id
+  ,to_char(ld.delivery_time,'yyyymmdd') as delivery_date--发货日期
+  ,sum( pg.cost) as total_purchase_cost
+  ,sum(case when nvl(b.if_cleared,'un_cleared') = 'cleared'  then pg.cost else 0 end) as cleared_purchase_cost
+  ,sum(case when nvl(b.if_cleared,'un_cleared') = 'un_cleared'  then pg.cost else 0 end) as uncleared_purchase_cost
+  ,sum(case when oog.sku_id!=oog.originalskuid and oog.originalskuid!=0 then nvl(ogpc.org_sku_cost,0) else pg.cost end) as total_purchase_cost_original
+  ,sum(case when nvl(b.if_cleared,'un_cleared') = 'cleared' then case when oog.sku_id!=oog.originalskuid and oog.originalskuid!=0 then nvl(ogpc.org_sku_cost,0) else pg.cost end
+            else 0
+       end
+   ) as cleared_purchase_cost_original
+  ,sum(case when nvl(b.if_cleared,'un_cleared') = 'un_cleared' then case when oog.sku_id!=oog.originalskuid and oog.originalskuid!=0 then nvl(ogpc.org_sku_cost,0) else pg.cost end
+            else 0
+       end
+   ) as uncleared_purchase_cost_original
+from (select ldd.*,row_number() over (partition by ldd.bill_id order by ldd.create_time desc) as rns from ods_erp_erp_logistics_delivery_detail ldd where ldd.pt = '${date}') ldd
+left join ods_erp_erp_order_order_goods oog
+on (ldd.bill_id = oog.id and ldd.rns = 1 and oog.pt = '${date}')
+left join @erp_order_order oo
+on (oog.order_id = oo.id)
+left join
+(
+  select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+  from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+  --and ld.delivery_status = 1
+)  ld
+on (ldd.delivery_id=ld.id and ld.rn = 1)
+left join ods_erp_erp_purchase_goods pg
+on (pg.id = ldd.goods_id and pg.pt = max_pt('ods_erp_erp_purchase_goods'))
+left join  @cleared_info b
+on (oog.order_id = b.order_id and oog.sku_id=b.sku_id)
+left join app_looklook_daily_original_goods_purchase_cost ogpc
+on (oog.id = ogpc.order_goods_id and oog.order_id = ogpc.order_id and ogpc.pt = '${date}')
+where  ld.delivery_time <=to_date('${date}','yyyymmdd')
+group by
+   oo.site_id
+  ,oo.site_order_id
+  ,oo.id
+  ,ld.express_no
+  ,ld.company_id
+  ,to_char(ld.delivery_time,'yyyymmdd')
+;
+
+--物流成本
+@logistics_cost:=
+select
+     to_char(eld.delivery_time,'yyyymmdd') as delivery_date
+    ,oo.site_id
+    ,oo.site_order_id
+    ,oo.id
+    ,eld.express_no
+    ,eld.company_id
+    ,sum(nvl(abs(flsd.final_freight),0)) as logistics_cost
+    ,sum(nvl(abs(flsd.final_freight),0)) *(max(cleared_product_count)/max(product_count)) as cleared_logistics_cost
+    ,sum(nvl(abs(flsd.final_freight),0)) *(max(un_cleared_product_count)/max(product_count)) as un_cleared_logistics_cost
+from @erp_order_order oo
+left join
+(
+   select
+        a.delivery_time,
+        a.order_id,
+        a.express_no,
+        a.company_id,
+        count(1) as product_count,
+        sum(case when nvl(c.if_cleared,'un_cleared') = 'cleared' then 1 else 0 end) as cleared_product_count,
+        sum(case when nvl(c.if_cleared,'un_cleared') = 'un_cleared' then 1 else 0 end) as un_cleared_product_count
+    from (
+      select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+      from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+      --and ld.delivery_status = 1
+    )  a
+    join (select ldd.*,row_number() over (partition by ldd.bill_id order by ldd.create_time desc) as rns from ods_erp_erp_logistics_delivery_detail ldd where ldd.pt = '${date}') b
+    on (a.id=b.delivery_id and a.rn = 1 and b.rns = 1)
+    left join @cleared_info c
+    on (a.order_id=c.order_id and b.sku_id=c.sku_id)
+    where a.pt = '${date}'
+    group by
+        a.delivery_time,
+        a.order_id,
+        a.express_no,
+        a.company_id
+) eld
+on (oo.id = eld.order_id)
+left join
+(
+    select express_no,final_freight
+    from (
+          select f.express_no,f.final_freight,row_number() over(partition by f.express_no order by f.create_time desc) as rno
+          from ods_erp_erp_finance_logistics_settlement_detail  f
+          where f.pt=max_pt('ods_erp_erp_finance_logistics_settlement_detail')
+    ) nt
+    where nt.rno = 1
+) flsd
+on (eld.express_no = flsd.express_no)
+where eld.delivery_time <= to_date('${date}','yyyymmdd')
+group by
+   oo.site_id
+  ,oo.site_order_id
+  ,oo.id
+  ,eld.express_no
+  ,eld.company_id
+  ,to_char(eld.delivery_time,'yyyymmdd')
+;
+
+
+
+@gmv_freight_purchase_cost:=
+select
+     a.site_id,
+     a.site_name,
+     b.delivery_date,
+     b.express_no,
+     a.currency_code,
+     a.order_id,
+     a.erp_site_id,
+     sum(a.total_gmv) as total_gmv,
+     sum(a.cleared_gmv) as cleared_gmv,
+     sum(a.uncleared_gmv) as uncleared_gmv,
+     sum(b.total_purchase_cost) as total_purchase_cost,
+     sum(b.cleared_purchase_cost) as cleared_purchase_cost,
+     sum(b.uncleared_purchase_cost) as uncleared_purchase_cost,
+     sum(c.logistics_cost) as logistics_cost,
+     sum(c.cleared_logistics_cost) as cleared_logistics_cost,
+     sum(c.un_cleared_logistics_cost) as uncleared_logistics_cost,
+     sum(b.total_purchase_cost_original) as total_purchase_cost_original,
+     sum(b.cleared_purchase_cost_original) as cleared_purchase_cost_original,
+     sum(b.uncleared_purchase_cost_original) as uncleared_purchase_cost_original
+from @gmv_final a
+left join @purchase_cost b
+on (a.site_order_id = b.site_order_id and a.express_no = b.express_no and a.company_id = b.company_id)
+left join @logistics_cost c
+on (a.site_order_id = c.site_order_id and a.express_no = c.express_no and a.company_id = c.company_id)
+where a.rn=1
+group by
+  a.site_id,
+  a.site_name,
+  b.delivery_date,
+  b.express_no,
+  a.currency_code,
+  a.order_id,
+     a.erp_site_id
+;
+
+
+select * from @gmv_freight_purchase_cost a where a.delivery_date= '20211120';

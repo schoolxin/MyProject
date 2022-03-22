@@ -1,0 +1,849 @@
+--name:app_looklook_st_financial_summary
+--author:OrderPlus
+--create time:2020-04-28 10:35
+
+@cnytousd:=
+select a.data_dt,1/a.currency_transform_cny as  currency_transform
+from dwd_com_currency_transform a
+where a.pt = '${date}' and a.currency_code = 'USD';
+
+@order_cnt :=
+select
+  aoi.order_date as data_dt,
+  aoi.site_id,
+  aoi.site_name,
+  count(distinct aoi.order_id) as order_cnt,
+  sum(int(opi.product_quantity)) as total_product_cnt
+from dwd_looklook_allsitetype_order_info aoi
+left join dwd_looklook_allsitetype_order_product_info opi
+on aoi.site_id=opi.site_id and if(aoi.site_type ='spsite',aoi.order_sn,aoi.order_id) = opi.order_id and opi.pt=max_pt('dwd_looklook_allsitetype_order_product_info')
+where aoi.pt='${date}' and aoi.financial_status = 'paid'
+group by  aoi.order_date,aoi.site_id,aoi.site_name
+;
+
+
+--select * from dwd_mapping_erp_site_id a where a.site_name ='buymuskel' and a.pt = '${date}';
+
+@user_job:=
+select
+    user_id,
+    tuj.user_name as user_name,
+    job_id,
+    obj_id,
+    obj_type,
+    site_id,
+    group_id,
+    project_id,
+    business_unit_id,
+    start_date,
+    end_date,
+    ltj.name as job_name
+from ods_looklook_looklook_tb_user_job tuj
+join ods_looklook_looklook_tb_job ltj
+on tuj.job_id = ltj.id and ltj.pt = max_pt('ods_looklook_looklook_tb_user_job')
+where tuj.pt= max_pt('ods_looklook_looklook_tb_job') and tuj.end_date is null and ltj.name in ('长线大站站长','长线小站站长','业务单元负责人','孵化项目部负责人','事业部负责人')
+;
+@user_info:=
+select
+  distinct
+  uj.obj_id,
+  uj.obj_type,
+  coalesce(
+  siter.site_user_name,
+  group.group_user_name,
+  project.project_user_name,
+  bu.bu_user_name) as user_name
+from
+(
+    select distinct obj_id,obj_type,site_id,group_id,project_id,business_unit_id from @user_job
+) uj
+left join
+(
+  select
+      obj_id as site_id,
+      concat_ws(',',collect_set(user_name)) as site_user_name
+  from @user_job
+  where job_name in ('长线大站站长','长线小站站长')
+  and obj_type='site'
+  group by obj_id
+)siter
+on uj.site_id=siter.site_id
+left join
+(
+  select
+      obj_id as group_id,
+      concat_ws(',',collect_set(user_name)) as group_user_name
+  from @user_job
+  where job_name in ('业务单元负责人','孵化项目部负责人')
+  and obj_type='group'
+  group by obj_id
+)group
+on uj.group_id=group.group_id
+left join
+(
+  select
+      obj_id as project_id,
+      concat_ws(',',collect_set(user_name)) as project_user_name
+  from @user_job
+  where job_id in (19)
+  and obj_type='project' and 1=2
+  group by obj_id
+)project
+on uj.project_id=project.project_id
+left join
+(
+  select
+      obj_id as business_unit_id,
+      concat_ws(',',collect_set(user_name)) as bu_user_name
+  from @user_job
+  where job_name in ('事业部负责人')
+  and obj_type='business_unit'
+  group by obj_id
+)bu
+on uj.business_unit_id=bu.business_unit_id
+;
+
+
+
+@mapping_erp_site_info:=
+select
+    t2.site_id,
+    t2.site_name,
+    t2.erp_site_id
+from
+(
+    select
+    t1.site_name,
+    t1.site_id,
+    t1.erp_site_id,
+    t1.status,
+    row_number() over (partition by t1.erp_site_id order by t1.status asc) as rn
+    from
+    (
+        select
+            a.site_name,
+            a.site_id,
+            case when b.site_type_id = 4 then a.cod_erp_site_id else a.erp_site_id end as erp_site_id,
+            b.status
+        from dwd_mapping_erp_site_id a
+        join ods_looklook_looklook_tb_site b
+        on (a.site_id = b.id and b.pt='${date}')
+        where a.pt='${date}'
+    ) t1
+) t2
+where t2.rn =1
+
+;
+-- erp每日采购成本
+@purchase_cost:=
+select
+     bigint(esi.site_id) as site_id
+    ,esi.site_name
+    ,replace(dpc.pay_time,'-','') as data_dt
+    ,dpc.purchase_cost
+from @mapping_erp_site_info esi
+inner join
+(
+    select
+        site_id,
+        pay_time,
+        sum(purchase_cost) as purchase_cost
+    from
+    (
+        select
+            site_id,
+            replace(pay_time,'-','') as pay_time,
+            purchase_cost,
+            row_number() over(distribute by site_id,pay_time sort by create_time desc ) as rn
+        from ods_erp_erp_report_every_daya_purchase_cost
+        where pt=max_pt('ods_erp_erp_report_every_daya_purchase_cost') and replace(pay_time,'-','')<'20200728'
+
+        union all
+        select
+            site_id,
+            replace(pay_time,'-','') as pay_time,
+            purchase_cost,
+            row_number() over(distribute by site_id,pay_time sort by create_time desc ) as rn
+        from ods_erp_erp_report_every_daya_purchase_cost_cod
+        where pt=max_pt('ods_erp_erp_report_every_daya_purchase_cost_cod') and replace(pay_time,'-','')<'20200728'
+    )t
+    where rn=1
+    group by  site_id,  pay_time
+    union all
+    select
+        tb.site_id,tb.pay_time,sum(tb.purchase_cost) as purchase_cost
+    from
+    (
+        select a.site_id,a.pay_time,a.purchase_cost
+        from app_looklook_erp_every_day_purchasecost a
+        where a.dt<='${date}' and a.pay_time>='20200728' and a.pay_time<='20211108'
+        union all
+        select a.site_id,a.pay_time,a.purchase_cost
+        from app_looklook_erp_every_day_purchasecost_cod a
+        where a.dt<='${date}' and a.pay_time>='20200728' and a.pay_time<='20211108'
+        union all
+        select a.site_id,a.pay_time,a.purchase_cost
+        from app_looklook_erp_every_day_purchasecost_new a
+        where a.dt<='${date}'
+    ) tb
+    group by tb.site_id,tb.pay_time
+
+)dpc
+on esi.erp_site_id=dpc.site_id
+-- where esi.pt=max_pt('dwd_mapping_erp_site_id')
+;
+
+--采购折扣
+@purchase_cost_discount:=
+select
+     bigint(esi.site_id) as site_id
+    ,esi.site_name
+    ,spd.pay_date as data_dt
+    ,spd.purchase_cost_discount
+from @mapping_erp_site_info esi
+inner join app_looklook_every_day_site_purchase_discount spd
+on (esi.erp_site_id = spd.site_id and spd.pt= '${date}')
+;
+
+@purchase_costAnddiscount:=
+select
+  pc.site_id
+ ,pc.site_name
+ ,pc.purchase_cost
+ ,pc.data_dt
+ ,nvl(pcd.purchase_cost_discount,0) as purchase_cost_discount
+from @purchase_cost pc
+left join @purchase_cost_discount pcd
+on (pc.site_id = pcd.site_id and pc.data_dt = pcd.data_dt)
+;
+
+
+
+
+
+-- 采购物流old end
+
+-- 每日营销花费
+@market_cost_1 :=
+select
+     dmc.data_dt
+    ,dmc.site_id
+    ,sum(dmc.market_cost*cct.currency_transform_cny) as market_cost
+    ,sum(case when  dmc.market_channel='google' then dmc.market_cost*cct.currency_transform_cny end) as google_cost
+    ,sum(case when  dmc.market_channel='fb' then dmc.market_cost*cct.currency_transform_cny end) as facebook_cost
+    ,sum(dmc.service_fees*cct.currency_transform_cny) as service_fees_cny
+from app_looklook_daily_market_cost dmc
+left join dwd_com_currency_transform cct
+on dmc.currency_code=cct.currency_code and dmc.data_dt=cct.data_dt and cct.pt=max_pt('dwd_com_currency_transform')
+where dmc.pt='${date}'
+group by
+     dmc.data_dt
+    ,dmc.site_id
+;
+-- 每日测款营销花费
+@test_market_cost:=
+select
+    dtmc.data_dt,
+    dtmc.site_id,
+    sum(dtmc.test_market_cost_cny) as test_market_cost_cny
+from app_looklook_daily_test_market_cost dtmc
+where dtmc.pt = '${date}'
+group by
+  dtmc.data_dt,
+  dtmc.site_id
+;
+@market_cost:=
+select
+    nvl(a.data_dt,b.data_dt) as data_dt,
+    nvl(a.site_id,b.site_id) as site_id,
+    nvl(a.market_cost,0) as market_cost,
+    nvl(a.facebook_cost,0) as facebook_cost,
+    nvl(a.google_cost,0) as google_cost,
+    nvl(b.test_market_cost_cny,0) as test_market_cost_cny,
+    nvl(a.service_fees_cny,0) as service_fees_cny
+from @market_cost_1 a
+full join @test_market_cost b
+on (a.site_id = b.site_id  and a.data_dt = b.data_dt)
+;
+
+
+@sale_amount :=
+select
+   t.data_dt,
+   t.site_id,
+   t.site_name,
+   t.total_amount,
+   t.site_type_id,
+   t.platform_fees,
+   t.order_cnt,
+   t.business_unit_name
+from app_looklook_daily_site_gmv_info t
+where t.pt = '${date}'
+;
+-- 站点复购率
+@site_repurchase:=
+select
+   a.site_id
+  ,a.data_dt
+  ,a.site_name
+  ,sum(a.new_user_count) as new_user_count
+  ,sum(a.buyleastone_user_count) as buyleastone_user_count
+from app_looklook_daily_site_user_repurchase a
+where a.dt = '${date}'
+group by a.site_id,a.data_dt,a.site_name;
+
+--站点商品锁定率
+@site_product_locked:=
+select
+  a.dt as data_dt
+ ,a.site_id
+ ,sum(a.total_proudct_count) as total_proudct_count
+ ,sum(a.locked_product_count) as locked_product_count
+from app_looklook_daily_site_prodcut_locked a
+where a.dt<='${date}'
+group by a.dt,a.site_id
+;
+
+
+--dengzz add 售卖系统销售额 end
+
+-- 当前日期月初到当前日期的收入和
+@business_month_avg:=
+select
+ t.data_dt,
+ t.business_unit_name,
+ (t.cumulation_amount/t.date_diff)/10000 as business_month_avg_usd -- 万美金
+from
+(
+    select
+      t.data_dt,
+      t.business_unit_name,
+      sum(t.total_amount) over (partition by substring(t.data_dt,1,6),t.business_unit_name order by t.data_dt rows between unbounded preceding and current row ) as cumulation_amount,
+      datediff(to_date(t.data_dt,'yyyymmdd'),datetrunc(to_date(t.data_dt,'yyyymmdd'),'mm'))+1 as date_diff
+    from
+    (
+      select
+        a.data_dt,
+        b.business_unit_name,
+        sum(a.total_amount*cct.currency_transform) as total_amount
+      from @sale_amount a
+      inner join dwd_com_site_org_info b
+      on (a.site_id = b.site_id and b.pt = '${date}')
+      left join @cnytousd cct
+      on (a.data_dt = cct.data_dt)
+--      where a.data_dt>='20210501'
+      group by a.data_dt,b.business_unit_name
+    ) t
+) t
+;
+
+--每个事业部每天的收费比例
+-- 收费比例 =  [5.77%-1.1%*ln(事业部当月日均GMV)]
+@business_month_daily_fees_rate:=
+select
+  t.data_dt,
+  t.business_unit_name,
+  t.business_month_avg_usd,
+  1*(0.0577-0.011*ln(t.business_month_avg_usd)) as fees_rate
+from @business_month_avg t
+;
+
+
+--收入&退拒金额
+@order_dimension_refund_rate:=
+select
+   drr.site_id
+  ,drr.date_dt
+  ,drr.order_gmv_cny
+  ,drr.cancel_order_gmv_cny
+  ,drr.order_refund_cny
+from app_looklook_daily_order_dimension_refund_rate drr
+where drr.pt = '${date}' and drr.date_dt<'20211101'
+union all
+select
+   crr.site_id
+  ,crr.order_date as date_dt
+  ,crr.order_gmv_cny
+  ,nvl(dcg.cancel_order_gmv_cny,0) as cancel_order_gmv_cny
+  ,crr.order_refund_cny
+from app_looklook_site_order_deminsion_chargeback_refund_rate crr
+left join app_looklook_site_order_deminsion_cancel_gmv dcg
+on (crr.order_date = dcg.order_date and crr.site_id =dcg.site_id and dcg.pt = '${date}')
+where crr.pt = '${date}' and crr.order_date>='20211101'
+;
+
+@sale_refunds_chargechack_1:=
+select
+  a.site_id,
+  a.site_name,
+  a.site_type_id,
+  a.total_amount-nvl(b.cancel_order_gmv_cny,0) as total_amount,
+  a.order_cnt,
+  a.platform_fees,
+  a.data_dt,
+  case when b.order_gmv_cny = 0 then 0 else (a.total_amount-nvl(b.cancel_order_gmv_cny,0))*(b.order_refund_cny/b.order_gmv_cny) end as refund_chargeback,
+  a.total_amount as total_amount_all,
+  a.total_amount*c.refund_chargeback_rate as refund_chargeback_old,
+  (a.total_amount-nvl(b.cancel_order_gmv_cny,0))*nvl(fr.fees_rate,0) as site_fees,
+  nvl(locked.total_proudct_count,0) as total_proudct_count,
+  nvl(locked.locked_product_count,0) as locked_product_count,
+  a.total_amount*nvl(fre.fees_rate,0) as order_handle_fees
+--   b.refund_chargeback_rate
+from @sale_amount a
+left join @order_dimension_refund_rate b
+on (a.site_id = b.site_id and a.data_dt = b.date_dt)
+left join app_looklook_daily_site_refunds_chargeback_rate c
+on (a.site_id = c.site_id and a.data_dt = c.data_dt and c.pt = '${date}')
+left join app_looklook_cloud_site_every_month_fees_rate fr
+on (a.site_id = fr.site_id and substring(a.data_dt,1,6)= fr.data_month and fr.pt= '${date}')
+left join @site_product_locked locked
+on (a.data_dt = locked.data_dt and a.site_id = locked.site_id)
+left join @business_month_daily_fees_rate fre
+on (a.data_dt = fre.data_dt and a.business_unit_name = fre.business_unit_name)
+;
+
+
+@sale_refunds_chargechack:=
+select
+  nvl(a.site_id,b.site_id) as site_id,
+  nvl(a.site_name,b.site_name) as site_name,
+  nvl(a.total_amount,0) as total_amount,
+  nvl(a.order_cnt,0) as order_cnt,
+  nvl(a.platform_fees,0) as platform_fees,
+  nvl(a.data_dt,b.data_dt) as data_dt,
+  nvl(a.refund_chargeback,0) as refund_chargeback,
+  nvl(a.total_amount_all,0) as total_amount_all,
+  nvl(a.refund_chargeback_old,0) as refund_chargeback_old,
+  nvl(a.site_fees,0) as site_fees,
+  nvl(a.total_proudct_count,0) as total_proudct_count,
+  nvl(a.locked_product_count,0) as locked_product_count,
+  nvl(b.new_user_count,0) as new_user_count,
+  nvl(b.buyleastone_user_count,0) as buyleastone_user_count,
+  nvl(a.order_handle_fees,0) as order_handle_fees
+from @sale_refunds_chargechack_1 a
+full join @site_repurchase b
+on (a.site_id = b.site_id and a.data_dt = b.data_dt)
+;
+
+
+-- 发货维度物流和采购占比
+@delivery_deminsion_cost_rate_pre:=
+select
+  distinct
+  a.data_dt,
+  site_id as obj_id,
+  case when a.gmv_amount_cny = 0 and a.logistics_cost_cny>0  then 1
+       when a.gmv_amount_cny = 0 and a.logistics_cost_cny= 0 then 0
+       else
+       case when a.logistics_cost_cny/a.gmv_amount_cny >0.3 then 0.3 else a.logistics_cost_cny/a.gmv_amount_cny end
+  end as logistics_cost_rate
+from  app_looklook_site_delivery_gmv_logis_info a
+where a.pt = '${date}'  and a.site_id>0
+;
+@delivery_deminsion_cost_rate:=
+select
+  a.data_dt,
+  a.obj_id,
+  a.logistics_cost_rate
+from @delivery_deminsion_cost_rate_pre a
+where a.data_dt<'20220101'
+union all
+select
+  a.date_dt,
+  a.site_id as obj_id,
+--  if(nvl(b.logistics_cost_rate,0)=0,if(a.logistics_cost_rate_last_7>0.3,0.3,a.logistics_cost_rate_last_7),nvl(b.logistics_cost_rate,0)),
+  case when nvl(b.logistics_cost_rate,0)=0 then if(a.logistics_cost_rate_last_7>0.3,0.3,a.logistics_cost_rate_last_7)
+       else
+       case when a.logistics_cost_rate_last_7!= 0 and nvl(b.logistics_cost_rate,0)>a.logistics_cost_rate_last_7 then a.logistics_cost_rate_last_7
+            else nvl(b.logistics_cost_rate,0)
+       end
+  end as logistics_cost_rate
+from app_looklook_logistics_cost_rate_last_7 a
+left join @delivery_deminsion_cost_rate_pre b
+on (a.date_dt = b.data_dt and a.site_id = b.obj_id)
+where a.pt = max_pt('app_looklook_logistics_cost_rate_last_7')
+;
+
+
+@org_daily_revenue_2:=
+select distinct
+     coalesce(oc.data_dt,mc.data_dt,pc.data_dt,sa.data_dt) as data_dt
+    ,coalesce(oc.site_id,mc.site_id,pc.site_id,sa.site_id) as site_id
+    ,coalesce(oc.site_name,pc.site_name,sa.site_name) as site_name
+    ,'site' as obj_type
+    ,0 as gmv_amount_cny -- 调整业务废弃
+    ,0 as gmv_amount_usd -- 调整业务废弃
+    ,-sa.platform_fees as payment_fee_cny  --TODO 修改费用为销售额占比
+    ,0 as sales_fee_cny  --TODO 修改费用为销售额占比合并到支付平台费用中
+    ,nvl(mc.market_cost,0) as market_cost_cny
+    ,0 as logistics_cost_cny  -- 调整业务废弃
+    ,0 as purchase_cost_cny  -- 调整业务废弃
+    ,0 as labor_cost  -- 调整业务废弃
+    ,0 as management_cost  -- 调整业务废弃
+    ,oc.order_cnt as order_count
+    ,oc.total_product_cnt as order_product_count
+    ,mc.google_cost as google_cost
+    ,mc.facebook_cost as facebook_cost
+    ,0 as other_cost_cny -- 调整业务废弃
+    ,nvl(sa.total_amount,0) as sale_amount
+    ,0 as logistics_sales_cost_cny -- 调整业务废弃
+    ,0 as purchase_sales_cost_cny -- 调整业务废弃
+    ,0 as purchase_cost_cny_1  -- 调整业务废弃
+    ,0 as logistics_cost_cny_1 -- 调整业务废弃
+    ,pc.purchase_cost as  purchase_cost_erp
+    ,0 as  logistics_cost_erp
+    ,0 as refunds_cny
+    ,0 as chargeback_cny
+    ,sa.refund_chargeback as refund_chargeback
+    ,nvl(mc.test_market_cost_cny,0) as test_market_cost_cny
+    ,nvl(sa.total_amount_all,0) as total_amount_all
+    ,nvl(sa.refund_chargeback_old,0) as refund_chargeback_old
+    ,nvl(sa.site_fees,0) as site_fees
+    ,nvl(mc.service_fees_cny,0) as service_fees_cny
+    ,nvl(sa.total_proudct_count,0) as total_proudct_count -- 当天总共物品数量
+    ,nvl(sa.locked_product_count,0) as locked_product_count --当天锁仓的物品数量
+    ,nvl(sa.new_user_count,0) as new_user_count -- 上月新增用户
+    ,nvl(sa.buyleastone_user_count,0) as buyleastone_user_count -- 上月新增用户中复购的用户
+    ,nvl(sa.order_handle_fees,0) as order_handle_fees -- 订单处理费
+    ,nvl(pc.purchase_cost_discount,0) as purchase_cost_discount
+from @order_cnt oc
+full join @market_cost mc
+on oc.site_id=mc.site_id and oc.data_dt=mc.data_dt
+full join @purchase_costAnddiscount pc
+on coalesce(oc.site_id,mc.site_id)=pc.site_id and coalesce(oc.data_dt,mc.data_dt)=pc.data_dt
+full join @sale_refunds_chargechack sa
+on coalesce(oc.site_id,mc.site_id,pc.site_id)=sa.site_id and coalesce(oc.data_dt,mc.data_dt,pc.data_dt)=sa.data_dt
+where coalesce(oc.site_id,mc.site_id,pc.site_id,sa.site_id)  is not null and coalesce(oc.site_id,mc.site_id,pc.site_id,sa.site_id)!=2444
+and coalesce(oc.data_dt,mc.data_dt,pc.data_dt,sa.data_dt,oc.data_dt)>='20190601'
+and coalesce(oc.data_dt,mc.data_dt,pc.data_dt,sa.data_dt,oc.data_dt)<='${date}';
+
+
+---人力 管理成本
+@site_cost_manage:=
+select
+  a.data_dt,
+  a.site_id,
+  nvl(b.site_name,'other') as site_name,
+  sum(a.labor_costs) as labor_costs,
+  sum(a.manage_costs) as manage_costs
+from app_looklook_daily_site_labor_manage_cost a
+left join ods_looklook_looklook_tb_site b
+on (a.site_id = b.id and b.pt = '${date}')
+where a.coefficient_type = 'order_dimension' and a.pt = '${date}'
+group by a.data_dt,a.site_id,nvl(b.site_name,'other');
+
+@org_daily_revenue:=
+select
+   nvl(tb1.data_dt,tb3.data_dt) as data_dt
+  ,nvl(tb1.site_id,tb3.site_id) as site_id
+  ,nvl(tb1.site_name,tb3.site_name) as site_name
+  ,nvl(tb1.obj_type,'site') as obj_type
+  ,nvl(tb1.gmv_amount_cny,0) as gmv_amount_cny
+  ,nvl(tb1.gmv_amount_usd,0) as gmv_amount_usd
+  ,nvl(tb1.payment_fee_cny,0) as payment_fee_cny
+  ,nvl(tb1.sales_fee_cny,0) as sales_fee_cny
+  ,nvl(tb1.market_cost_cny,0) as market_cost_cny
+  ,nvl(tb1.purchase_cost_cny,0) as purchase_cost_cny
+  ,nvl(tb1.logistics_cost_cny,0) as logistics_cost_cny
+--  ,tb1.management_cost
+  ,nvl(tb1.order_count,0) as order_count
+  ,nvl(tb1.order_product_count,0) as order_product_count
+  ,nvl(tb1.google_cost,0) as google_cost
+  ,nvl(tb1.facebook_cost,0) as facebook_cost
+  ,nvl(tb1.other_cost_cny,0) as other_cost_cny
+  ,nvl(tb1.sale_amount,0) as sale_amount
+  ,nvl(tb1.logistics_sales_cost_cny,0) as logistics_sales_cost_cny
+  ,nvl(tb1.purchase_sales_cost_cny,0) as purchase_sales_cost_cny
+  ,nvl(tb1.purchase_cost_cny_1,0) as purchase_cost_cny_1
+  ,nvl(tb1.logistics_cost_cny_1,0) as logistics_cost_cny_1
+  ,nvl(tb1.purchase_cost_erp,0) as purchase_cost_erp
+  ,nvl(tb1.logistics_cost_erp,0) as logistics_cost_erp
+  ,nvl(tb1.refunds_cny,0) as refunds_cny
+  ,nvl(tb1.chargeback_cny,0) as chargeback_cny
+  ,nvl(tb1.refund_chargeback,0) as refund_chargeback
+  ,nvl(tb1.sale_amount,0)*tb2.logistics_cost_rate as logistics_cost_delivery
+  ,nvl(tb1.test_market_cost_cny,0) as test_market_cost_cny
+  ,nvl(tb1.total_amount_all,0) as total_amount_all
+  ,nvl(tb1.refund_chargeback_old,0) as refund_chargeback_old
+  ,nvl(tb3.manage_costs,0) as management_cost
+  ,nvl(tb3.labor_costs,0) as labor_costs
+  ,nvl(tb1.site_fees,0) as site_fees
+  ,nvl(tb1.service_fees_cny,0) as service_fees_cny
+  ,nvl(tb1.total_proudct_count,0) as total_proudct_count
+  ,nvl(tb1.locked_product_count,0) as locked_product_count
+  ,nvl(tb1.new_user_count,0) as new_user_count
+  ,nvl(tb1.buyleastone_user_count,0) as buyleastone_user_count
+  ,nvl(tb1.order_handle_fees,0) as order_handle_fees
+  ,nvl(tb1.purchase_cost_discount,0) as purchase_cost_discount
+from @org_daily_revenue_2 tb1
+left join @delivery_deminsion_cost_rate tb2
+on (tb1.site_id = tb2.obj_id  and tb1.data_dt = tb2.data_dt)
+full join @site_cost_manage tb3
+on (tb1.data_dt = tb3.data_dt and tb1.site_id = tb3.site_id)
+;
+
+
+
+
+
+insert overwrite table app_looklook_st_financial_summary partition (pt='${date}')
+select
+     tb1.data_dt
+    ,tb1.obj_id
+    ,tb1.obj_name
+    ,tb1.obj_type
+    ,tb1.gmv_amount_cny
+    ,tb1.gmv_amount_usd
+    ,tb1.payment_fee_cny
+    ,tb1.sales_fee_cny
+    ,tb1.market_cost_cny
+    ,tb1.purchase_cost_cny
+    ,tb1.logistics_cost_cny
+    ,tb1.currency_transform
+    ,tb1.management_cost
+    ,tb1.order_count
+    ,tb1.order_product_count
+    ,tb1.google_cost
+    ,tb1.facebook_cost
+    ,tb1.other_cost_cny
+    ,tb1.sale_amount
+    ,tb1.logistics_sales_cost_cny
+    ,tb1.purchase_sales_cost_cny
+    ,tb1.purchase_cost_cny_1
+    ,tb1.logistics_cost_cny_1
+    ,tb1.purchase_cost_erp
+    ,tb1.logistics_cost_erp
+    ,tb1.refunds_cny
+    ,tb1.chargeback_cny
+    ,tb1.refund_chargeback
+    ,tb1.logistics_cost_delivery
+    ,tb1.test_market_cost_cny
+    ,tb1.total_amount_all
+    ,tb1.refund_chargeback_old
+    ,tb1.labor_costs
+    ,tb2.user_name
+    ,tb1.site_fees
+    ,tb1.master_id
+    ,tb1.service_fees_cny
+    ,tb1.total_proudct_count
+    ,tb1.locked_product_count
+    ,tb1.new_user_count
+    ,tb1.buyleastone_user_count
+    ,tb1.order_handle_fees
+    ,tb1.purchase_cost_discount
+from
+(
+    select
+       odr.data_dt
+      ,bigint(odr.site_id) as obj_id
+      ,odr.site_name as obj_name
+      ,odr.obj_type
+      ,odr.gmv_amount_cny
+      ,odr.gmv_amount_usd
+      ,odr.payment_fee_cny
+      ,odr.sales_fee_cny
+      ,odr.market_cost_cny
+      ,odr.purchase_cost_cny
+      ,odr.logistics_cost_cny
+      ,ctd.currency_transform as currency_transform
+      ,odr.management_cost
+      ,odr.order_count
+      ,odr.order_product_count
+      ,odr.google_cost
+      ,odr.facebook_cost
+      ,odr.other_cost_cny
+      ,odr.sale_amount
+      ,odr.logistics_sales_cost_cny
+      ,odr.purchase_sales_cost_cny
+      ,odr.purchase_cost_cny_1
+      ,odr.logistics_cost_cny_1
+      ,odr.purchase_cost_erp
+      ,odr.logistics_cost_erp
+      ,odr.refunds_cny
+      ,odr.chargeback_cny
+      ,odr.refund_chargeback
+      ,odr.logistics_cost_delivery
+      ,odr.test_market_cost_cny
+      ,odr.total_amount_all
+      ,odr.refund_chargeback_old
+      ,odr.labor_costs
+      ,odr.site_fees
+      ,nvl(site.master_id,odr.site_id) as master_id
+      ,nvl(odr.service_fees_cny,0) as service_fees_cny
+      ,nvl(odr.total_proudct_count,0) as total_proudct_count
+      ,nvl(odr.locked_product_count,0) as locked_product_count
+      ,nvl(odr.new_user_count,0) as new_user_count
+      ,nvl(odr.buyleastone_user_count,0) as buyleastone_user_count
+      ,nvl(odr.order_handle_fees,0) as order_handle_fees
+      ,nvl(odr.purchase_cost_discount,0) as purchase_cost_discount
+    from @org_daily_revenue odr
+    join @cnytousd ctd
+    on (odr.data_dt = ctd.data_dt)
+    left join ods_looklook_looklook_tb_site site
+    on (odr.site_id = site.id and site.pt = '${date}')
+    union all
+    select
+        odr.data_dt
+       ,coi.group_id as obj_id
+       ,coi.group_name as obj_name
+       ,'group' as obj_type
+       ,sum(odr.gmv_amount_cny) as gmv_amount_cny
+       ,sum(odr.gmv_amount_usd) as gmv_amount_usd
+       ,sum(odr.payment_fee_cny) as payment_fee_cny
+       ,sum(odr.sales_fee_cny) as sales_fee_cny
+       ,sum(odr.market_cost_cny) as market_cost_cny
+       ,sum(odr.purchase_cost_cny) as purchase_cost_cny
+       ,sum(odr.logistics_cost_cny)  as logistics_cost_cny
+       ,max(ctd.currency_transform)  as currency_transform
+       ,sum(odr.management_cost) as management_cost
+       ,sum(odr.order_count) as order_count
+       ,sum(odr.order_product_count) as order_product_count
+       ,sum(odr.google_cost) as google_cost
+       ,sum(odr.facebook_cost) as facebook_cost
+       ,sum(odr.other_cost_cny) as other_cost_cny
+       ,sum(odr.sale_amount) as sale_amount
+       ,sum(odr.logistics_sales_cost_cny) as logistics_sales_cost_cny
+       ,sum(odr.purchase_sales_cost_cny) as purchase_sales_cost_cny
+       ,sum(odr.purchase_cost_cny_1) as purchase_cost_cny_1
+       ,sum(odr.logistics_cost_cny_1) as logistics_cost_cny_1
+       ,sum(odr.purchase_cost_erp) as purchase_cost_erp
+       ,sum(odr.logistics_cost_erp) as logistics_cost_erp
+       ,sum(odr.refunds_cny) as refunds_cny
+       ,sum(odr.chargeback_cny) as chargeback_cny
+       ,sum(odr.refund_chargeback) as refund_chargeback
+       ,sum(odr.logistics_cost_delivery) as logistics_cost_delivery
+       ,sum(odr.test_market_cost_cny) as test_market_cost_cny
+       ,sum(odr.total_amount_all) as total_amount_all
+       ,sum(odr.refund_chargeback_old) as refund_chargeback_old
+       ,sum(odr.labor_costs) as labor_costs
+       ,sum(odr.site_fees) as site_fees
+       ,string(coi.group_id) as master_id
+       ,sum(odr.service_fees_cny) as service_fees_cny
+       ,sum(nvl(odr.total_proudct_count,0)) as total_proudct_count
+       ,sum(nvl(odr.locked_product_count,0)) as locked_product_count
+       ,sum(nvl(odr.new_user_count,0)) as new_user_count
+       ,sum(nvl(odr.buyleastone_user_count,0)) as buyleastone_user_count
+       ,sum(nvl(odr.order_handle_fees,0)) as order_handle_fees
+       ,sum(nvl(odr.purchase_cost_discount,0)) as purchase_cost_discount
+    from @org_daily_revenue odr
+    join dwd_com_site_org_info coi
+    on odr.site_id=coi.site_id and coi.pt=max_pt('dwd_com_site_org_info')
+    join @cnytousd ctd
+    on (odr.data_dt = ctd.data_dt)
+    where coi.business_unit_id is not null
+    group by
+        odr.data_dt
+       ,coi.group_id
+       ,coi.group_name
+    union all
+    select
+        odr.data_dt
+       ,coi.project_id as obj_id
+       ,coi.project_name as obj_name
+       ,'project' as obj_type
+       ,sum(odr.gmv_amount_cny) as gmv_amount_cny
+       ,sum(odr.gmv_amount_usd) as gmv_amount_usd
+       ,sum(odr.payment_fee_cny) as payment_fee_cny
+       ,sum(odr.sales_fee_cny) as sales_fee_cny
+       ,sum(odr.market_cost_cny) as market_cost_cny
+       ,sum(odr.purchase_cost_cny) as purchase_cost_cny
+       ,sum(odr.logistics_cost_cny)  as logistics_cost_cny
+       ,max(ctd.currency_transform)  as currency_transform
+       ,sum(odr.management_cost) as management_cost
+       ,sum(odr.order_count) as order_count
+       ,sum(odr.order_product_count) as order_product_count
+       ,sum(odr.google_cost) as google_cost
+       ,sum(odr.facebook_cost) as facebook_cost
+       ,sum(odr.other_cost_cny) as other_cost_cny
+       ,sum(odr.sale_amount) as sale_amount
+       ,sum(odr.logistics_sales_cost_cny) as logistics_sales_cost_cny
+       ,sum(odr.purchase_sales_cost_cny) as purchase_sales_cost_cny
+       ,sum(odr.purchase_cost_cny_1) as purchase_cost_cny_1
+       ,sum(odr.logistics_cost_cny_1) as logistics_cost_cny_1
+       ,sum(odr.purchase_cost_erp) as purchase_cost_erp
+       ,sum(odr.logistics_cost_erp) as logistics_cost_erp
+       ,sum(odr.refunds_cny) as refunds_cny
+       ,sum(odr.chargeback_cny) as chargeback_cny
+       ,sum(odr.refund_chargeback) as refund_chargeback
+       ,sum(odr.logistics_cost_delivery) as logistics_cost_delivery
+       ,sum(odr.test_market_cost_cny) as test_market_cost_cny
+       ,sum(odr.total_amount_all) as total_amount_all
+       ,sum(odr.refund_chargeback_old) as refund_chargeback_old
+       ,sum(odr.labor_costs) as labor_costs
+       ,sum(odr.site_fees) as site_fees
+       ,string(coi.project_id) as master_id
+       ,sum(odr.service_fees_cny) as service_fees_cny
+       ,sum(nvl(odr.total_proudct_count,0)) as total_proudct_count
+       ,sum(nvl(odr.locked_product_count,0)) as locked_product_count
+       ,sum(nvl(odr.new_user_count,0)) as new_user_count
+       ,sum(nvl(odr.buyleastone_user_count,0)) as buyleastone_user_count
+       ,sum(nvl(odr.order_handle_fees,0)) as order_handle_fees
+       ,sum(nvl(odr.purchase_cost_discount,0)) as purchase_cost_discount
+    from @org_daily_revenue odr
+    join dwd_com_site_org_info coi
+    on odr.site_id=coi.site_id and coi.pt=max_pt('dwd_com_site_org_info')
+    join @cnytousd ctd
+    on (odr.data_dt = ctd.data_dt)
+    where coi.business_unit_id is not null
+    group by
+        odr.data_dt
+       ,coi.project_id
+       ,coi.project_name
+    union all
+    select
+        odr.data_dt
+       ,coi.business_unit_id as obj_id
+       ,coi.business_unit_name as obj_name
+       ,'business_unit' as obj_type
+       ,sum(odr.gmv_amount_cny) as gmv_amount_cny
+       ,sum(odr.gmv_amount_usd) as gmv_amount_usd
+       ,sum(odr.payment_fee_cny) as payment_fee_cny
+       ,sum(odr.sales_fee_cny) as sales_fee_cny
+       ,sum(odr.market_cost_cny) as market_cost_cny
+       ,sum(odr.purchase_cost_cny) as purchase_cost_cny
+       ,sum(odr.logistics_cost_cny)  as logistics_cost_cny
+       ,max(ctd.currency_transform)  as currency_transform
+       ,sum(odr.management_cost) as management_cost
+       ,sum(odr.order_count) as order_count
+       ,sum(odr.order_product_count) as order_product_count
+       ,sum(odr.google_cost) as google_cost
+       ,sum(odr.facebook_cost) as facebook_cost
+       ,sum(odr.other_cost_cny) as other_cost_cny
+       ,sum(odr.sale_amount) as sale_amount
+       ,sum(odr.logistics_sales_cost_cny) as logistics_sales_cost_cny
+       ,sum(odr.purchase_sales_cost_cny) as purchase_sales_cost_cny
+       ,sum(odr.purchase_cost_cny_1) as purchase_cost_cny_1
+       ,sum(odr.logistics_cost_cny_1) as logistics_cost_cny_1
+       ,sum(odr.purchase_cost_erp) as purchase_cost_erp
+       ,sum(odr.logistics_cost_erp) as logistics_cost_erp
+       ,sum(odr.refunds_cny) as refunds_cny
+       ,sum(odr.chargeback_cny) as chargeback_cny
+       ,sum(odr.refund_chargeback) as refund_chargeback
+       ,sum(odr.logistics_cost_delivery) as logistics_cost_delivery
+       ,sum(odr.test_market_cost_cny) as test_market_cost_cny
+       ,sum(odr.total_amount_all) as total_amount_all
+       ,sum(odr.refund_chargeback_old) as refund_chargeback_old
+       ,sum(odr.labor_costs) as labor_costs
+       ,sum(odr.site_fees) as site_fees
+       ,string(coi.business_unit_id) as master_id
+       ,sum(odr.service_fees_cny) as service_fees_cny
+       ,sum(nvl(odr.total_proudct_count,0)) as total_proudct_count
+       ,sum(nvl(odr.locked_product_count,0)) as locked_product_count
+       ,sum(nvl(odr.new_user_count,0)) as new_user_count
+       ,sum(nvl(odr.buyleastone_user_count,0)) as buyleastone_user_count
+       ,sum(nvl(odr.order_handle_fees,0)) as order_handle_fees
+       ,sum(nvl(odr.purchase_cost_discount,0)) as purchase_cost_discount
+    from @org_daily_revenue odr
+    join dwd_com_site_org_info coi
+    on odr.site_id=coi.site_id and coi.pt=max_pt('dwd_com_site_org_info')
+    join @cnytousd ctd
+    on (odr.data_dt = ctd.data_dt)
+    where coi.business_unit_id is not null
+    group by
+        odr.data_dt
+       ,coi.business_unit_id
+       ,coi.business_unit_name
+) tb1
+left join @user_info tb2
+on (tb1.obj_id = tb2.obj_id and tb1.obj_type = tb2.obj_type)
+;
