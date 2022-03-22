@@ -4,15 +4,277 @@
 --finance_codbacktoarticle  签收金额取这个表中的ActualCodFee 签收日期取SignTime 币种取CodCurrency
 --finance_codservicechargebacktoarticle 手续费
 -- 账单中的签收收入信息
--- 澳鹏
+--代收手续费
+@servicecharges_info:=
 select
-   upper(a.expressno) as expressno
-  ,a.signtime
-  ,nvl(a.actualcodfee,0) as actualcodfee
-  ,a.codcurrency
-from ods_erp_erp_finance_codbacktoarticle_full a
-where a.pt = '${date}' and to_char(a.deliverytime,'yyyymmdd')>='20220201'
+   to.expressno
+  ,to.company_name
+  ,to.express_name
+  ,to.actualservicecharges
+  ,to.actualcurrency
+  ,to.service_fee_input_time
+from
+(
+      select
+       t.*
+      ,row_number() over (partition by t.expressno,t.express_name order by level asc) as rn
+    from
+    (
+        select
+          upper(a.expressno) expressno
+         ,b.name as express_name
+         ,c.name as company_name
+         ,a.inputtime as service_fee_input_time
+         ,a.actualcurrency
+         ,1 as level
+         ,sum(a.actualservicecharges) as actualservicecharges
+        from ods_erp_erp_finance_codservicechargebacktoarticle a
+        left join ods_erp_erp_logistics_express b
+        on (a.expressid = b.id and b.pt = '${date}')
+        left join ods_erp_erp_logistics_company c
+        on (a.companyid = c.id and c.pt = '${date}')
+        where to_char(a.inputtime,'yyyymmdd')>='20200101' and a.pt = '${date}'
+        group by
+          upper(a.expressno)
+         ,a.inputtime
+         ,a.actualcurrency
+         ,b.name
+         ,c.name
+        union all
+        select
+          upper(a.expressno) as expressno
+         ,b.name as express_name
+         ,c.name as company_name
+         ,a.inputtime as service_fee_input_time
+         ,a.actualcurrency
+         ,2 as level
+         ,sum(a.actualservicecharges) as actualservicecharges
+        from ods_erp_erp_popopie_finance_codservicechargebacktoarticle a
+        left join ods_erp_erp_popopie_logistics_express b
+        on (a.expressid = b.id and b.pt = '${date}')
+        left join ods_erp_erp_popopie_logistics_company c
+        on (a.companyid = c.id and c.pt = '${date}')
+        where to_char(a.inputtime,'yyyymmdd')>='20200101' and a.pt = '${date}'
+        group by
+          upper(a.expressno)
+         ,a.inputtime
+         ,a.actualcurrency
+         ,b.name
+         ,c.name
+    ) t
+) to
+where to.rn =1
+;
+-- looklook.ods_erp_erp_logistics_express
+@mapping_erp_site_info:=
+select
+    t2.site_id,
+    t2.site_name,
+    t2.erp_site_id
+from
+(
+    select
+    t1.site_name,
+    t1.site_id,
+    t1.erp_site_id,
+    t1.status,
+    row_number() over (partition by t1.erp_site_id order by t1.status asc) as rn
+    from
+    (
+        select
+            a.site_name,
+            a.site_id,
+            case when b.site_type_id = 4 then a.cod_erp_site_id else a.erp_site_id end as erp_site_id,
+            b.status
+        from dwd_mapping_erp_site_id a
+        join ods_looklook_looklook_tb_site b
+        on (a.site_id = b.id and b.pt=max_pt('ods_looklook_looklook_tb_site'))
+        where a.pt=max_pt('dwd_mapping_erp_site_id')
+    ) t1
+) t2
+where t2.rn =1
+;
+@order_info_oms:=
+select
+    osp.order_id,osp.order_no,osp.erp_order_id,osp.paytime,ooa.site_id,osp.currency_name,nvl(osp.pay_amt,osp.order_amt) as order_amt
+from opdc.dwd_order_sales_process osp
+inner join (select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id) ooa
+on (osp.order_id = ooa.order_id)
+where 1=1 and lower(osp.pay_type) in ('货到付款','cod')
+group by osp.order_id,osp.order_no,osp.erp_order_id,osp.paytime,ooa.site_id,osp.currency_name,nvl(osp.pay_amt,osp.order_amt)
+union all
+select
+    osp.order_id,osp.order_no,osp.erp_order_id,osp.paytime,ooa.site_id,osp.currency_name,nvl(osp.pay_amt,osp.order_amt) as order_amt
+from popopiedc.dwd_order_sales_process osp
+inner join (select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id) ooa
+on (osp.order_id = ooa.order_id)
+where 1=1 and lower(osp.pay_type) in ('货到付款','cod')
+group by osp.order_id,osp.order_no,osp.erp_order_id,osp.paytime,ooa.site_id,osp.currency_name,nvl(osp.pay_amt,osp.order_amt)
+;
+@site_delivery_info_oms:=
+select
+   lps.order_id
+  ,lps.siteid
+  ,upper(lps.expressno) as expressno
+  ,lps.codcurrencyprice
+  ,lps.expressid
+  ,lps.express_name
+  ,lps.deliverytime
+  ,lps.fristtime
+  ,lps.fristfee
+from opdc.dw_logistics_package_shipments lps
+where 1=1
+and lps.deliverystatus != '清关退回'
+and lps.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) -- 剔除掉网红手工订单
+and lps.order_id not in (select cast(id as string) from opdc.ods_oms_order_order where order_type = 1) -- 剔除掉网红手工订单
+group by
+   lps.order_id
+  ,lps.siteid
+  ,lps.expressno
+  ,lps.codcurrencyprice
+  ,lps.expressid
+  ,lps.express_name
+  ,lps.deliverytime
+  ,lps.fristtime
+  ,lps.fristfee
+union all
+select
+   lps.order_id
+  ,lps.siteid
+  ,upper(lps.expressno) as expressno
+  ,lps.codcurrencyprice
+  ,lps.expressid
+  ,lps.express_name
+  ,lps.deliverytime
+  ,lps.fristtime
+  ,lps.fristfee
+from popopiedc.dw_logistics_package_shipments lps
+where 1=1
+and lps.deliverystatus != '清关退回'
+--and to_char(lps.deliverytime,'yyyymm')>='20211201'
+and lps.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1) -- 剔除网红订单
+group by
+   lps.order_id
+  ,lps.siteid
+  ,lps.expressno
+  ,lps.codcurrencyprice
+  ,lps.expressid
+  ,lps.express_name
+  ,lps.deliverytime
+  ,lps.fristtime
+  ,lps.fristfee
 ;
 
 
+@order_delivery_info:=
+select
+  oio.order_no,oio.erp_order_id,oio.order_id,oio.site_id,dio.express_name,dio.expressno
+from @order_info_oms oio
+inner join @site_delivery_info_oms dio
+on (nvl(oio.order_id,oio.erp_order_id) = dio.order_id and oio.site_id = dio.siteid)
+group by oio.order_no,oio.erp_order_id,oio.order_id,oio.site_id,dio.express_name,dio.expressno
+;
+-- 澳鹏
+@site_sign_gmv_info:=
+select
+   to.expressno
+  ,to.signtime
+  ,to.express_name
+  ,to.company_name
+  ,to.actualcodfee
+  ,to.codcurrency
+  ,to.inputtime as codback_gmv_input_time
+from
+(
+    select
+       t.expressno
+      ,t.signtime
+      ,t.express_name
+      ,t.company_name
+      ,t.actualcodfee
+      ,t.codcurrency
+      ,t.inputtime
+      ,row_number() over (partition by t.expressno,t.express_name order by t.level asc) as rn
+    from
+    (
+        select
+           upper(a.expressno) as expressno
+          ,to_char(a.signtime,'yyyymmdd') as signtime
+          ,b.name as express_name
+          ,c.name as company_name
+          ,sum(nvl(a.actualcodfee,0)) as actualcodfee
+          ,a.codcurrency
+          ,1 as level
+          ,a.inputtime
+        from ods_erp_erp_finance_codbacktoarticle_full a
+        left join ods_erp_erp_logistics_express b
+        on (a.expressid = b.id and b.pt = '${date}')
+        left join ods_erp_erp_logistics_company c
+        on (a.companyid = c.id and c.pt = '${date}')
+        where a.pt = '${date}' and to_char(a.signtime,'yyyymmdd')>='20220201'
+        group by
+           upper(a.expressno)
+          ,to_char(a.signtime,'yyyymmdd')
+          ,b.name
+          ,c.name
+          ,a.codcurrency
+          ,a.inputtime
+        union all
+        --宝宝派
+        select
+           upper(a.expressno) as expressno
+          ,to_char(a.signtime,'yyyymmdd') as signtime
+          ,b.name as express_name
+          ,c.name as company_name
+          ,sum(nvl(a.actualcodfee,0)) as actualcodfee
+          ,a.codcurrency
+          ,2 as level
+          ,a.inputtime
+        from ods_erp_erp_popopie_finance_codbacktoarticle_full a
+        left join ods_erp_erp_popopie_logistics_express b
+        on (a.expressid = b.id and b.pt = '${date}')
+        left join ods_erp_erp_popopie_logistics_company c
+        on (a.companyid = c.id and c.pt = '${date}')
+        where a.pt = '${date}' and to_char(a.signtime,'yyyymmdd')>='20220201'
+        group by
+           upper(a.expressno)
+          ,to_char(a.signtime,'yyyymmdd')
+          ,b.name
+          ,c.name
+          ,a.codcurrency
+          ,a.inputtime
+    ) t
+) to
+where to.rn = 1
 
+
+;
+-- 签收收入和代收手续费 明细
+select
+  nvl(s.site_id,99999) as "ops站点ID"
+ ,nvl(s.site_name,'others') as "ops站点名称"
+ ,cp.signtime as "签收日期"
+ ,cp.expressno as "物流单号"
+ ,cp.express_name as "快递名称"
+ ,cp.company_name as "物流公司"
+ ,nm.erp_order_id as "erp或者oms订单号"
+ ,nm.order_no as "erp或者oms订单编号"
+ ,cp.actualcodfee*cct.currency_transform as "签收金额(USD)"
+ ,cp.actualcodfee*cct.currency_transform_cny as "签收金额(CNY)"
+ ,cp.codback_gmv_input_time as "回款账单导入日期"
+ ,cp.codcurrency as "签收金额(原币)"
+ ,cp.actualcodfee as "签收金额币种"
+ ,si.actualservicecharges as "手续费(原币)"
+ ,si.actualcurrency as "手续费币种"
+ ,si.service_fee_input_time as "手续费导入日期"
+ ,si.actualservicecharges*cct.currency_transform as "手续费(USD)"
+ ,si.actualservicecharges*cct.currency_transform_cny as "手续费币种(CNY)"
+from @site_sign_gmv_info cp
+left join @order_delivery_info nm
+on (cp.expressno = nm.expressno)
+left join @mapping_erp_site_info s on nm.site_id = s.erp_site_id
+left join dwd_com_currency_transform cct
+on cp.signtime= cct.data_dt and upper(cp.codcurrency) = cct.currency_code and cct.pt = max_pt('dwd_com_currency_transform')
+left join @servicecharges_info si
+on (cp.expressno = si.expressno)
+;
