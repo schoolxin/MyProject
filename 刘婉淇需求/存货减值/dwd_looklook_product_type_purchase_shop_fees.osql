@@ -1,0 +1,284 @@
+--name:dwd_looklook_product_type_purchase_shop_fees
+--author:order
+--create time:2021-12-20 14:52
+-- 采购服务费  订单系统使用费
+-- 生产款(测试和企划) --- 现货款（1688  ODM POD）
+@product_type_info:=
+select
+  to.product_no,
+  to.product_type_desc,
+  case when product_type in (2,3) then '生产款' else '现货款' end product_type
+from
+(
+    select
+      tn.product_no,
+      row_number() over (partition by tn.product_no order by tn.levels asc) as rn,
+      tn.product_type_desc,
+      tn.product_type
+    from
+    (
+      select
+        a.product_no,
+        if(lower(nvl(a.system,'other'))='lms',1,2) as levels, --优先从lms系统取 取不到再从其他系统取
+        a.product_type_desc,
+        a.product_type
+      from opdc.dim_spu a
+      union all
+      select
+        a.product_no,
+        if(lower(nvl(a.system,'other'))='lms',1,2) as levels, --优先从lms系统取 取不到再从其他系统取
+        a.product_type_desc,
+        a.product_type
+       from popopiedc.dim_spu a
+    ) tn
+) to
+where to.rn =1
+;
+
+-- 收入均摊
+@order_goods_sale_info:=
+-- 非宝宝派
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,nvl(osp.sku_erp_id,osp.sku_id) as sku_erp_id
+  ,osp.spu_no
+  ,sum(abs(osp.good_price_currency)*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as good_price_currency
+  ,sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,'下单' as operate_type
+  ,nvl(osp.erp_order_id,osp.order_id) as erp_order_id
+  ,to_char(osp.paytime,'yyyymmdd') as pay_date
+from (
+  select osp.order_no,osp.order_id,nvl(oo.pay_amt,osp.order_amt) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from opdc.dwd_order_sales_process osp
+  left join
+  (
+    select t.id as order_id,t.pay_amt from opdc.ods_oms_order_order t group by t.id,t.pay_amt
+    union all
+    select t.id as order_id,t.pay_amt from popopiedc.ods_oms_order_order t where 1=2 group by t.id,t.pay_amt
+  ) oo
+  on (osp.order_id = oo.order_id)
+  where to_char(osp.paytime,'yyyymm') = '${month}'
+) osp
+inner join (
+    select b.order_id,b.site_id
+    from opdc.dwd_order_order_appendix b
+    where upper(nvl(b.pay_type,'others')) not in ('货到付款','COD')
+    group by b.order_id,b.site_id
+    union all
+    select b.order_id,b.site_id
+    from opdc.dwd_order_order_appendix b
+    where upper(b.pay_type)  in ('货到付款','COD') and b.site_order_status !='处理中' and lower(b.sys_source) = 'oms' -- erp只拉取site_order_status =2的数据
+    group by b.order_id,b.site_id
+    union all
+    select b.order_id,b.site_id
+    from opdc.dwd_order_order_appendix b
+    where upper(b.pay_type)  in ('货到付款','COD') and lower(b.sys_source) = 'erp'
+    group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where 1=1 and (osp.change_type in ('下单','补发') or (osp.change_details_type = '替换上' and osp.change_type = '换货') or (change_details_type = '原单商品取消' and change_type = '取消'))
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,nvl(osp.sku_erp_id,osp.sku_id)
+  ,osp.spu_no
+  ,osp.currency_name
+  ,nvl(osp.erp_order_id,osp.order_id)
+  ,to_char(osp.paytime,'yyyymmdd')
+union all
+-- 宝宝派
+select
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,nvl(osp.sku_erp_id,osp.sku_id) as sku_erp_id
+  ,osp.spu_no
+  ,sum(abs(osp.good_price_currency)*if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as good_price_currency
+  ,sum(if(osp.sales_qty=0,osp.current_sku_qty,osp.sales_qty)) as current_sku_qty -- 订单物品总数量
+  ,osp.currency_name
+  ,'下单' as operate_type
+  ,nvl(osp.erp_order_id,osp.order_id) as erp_order_id
+  ,to_char(osp.paytime,'yyyymmdd') as pay_date
+from (
+  select osp.order_no,osp.order_id,nvl(oo.pay_amt,osp.order_amt) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,change_details_type,
+         osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
+         osp.addtime,osp.change_type,osp.paytime,osp.erp_order_id,osp.sku_erp_id,osp.spu_erp_id
+  from popopiedc.dwd_order_sales_process osp
+  left join
+  (
+    select t.id as order_id,t.pay_amt from opdc.ods_oms_order_order t group by t.id,t.pay_amt
+    union all
+    select t.id as order_id,t.pay_amt from popopiedc.ods_oms_order_order t where 1=1 group by t.id,t.pay_amt
+  ) oo
+  on (osp.order_id = oo.order_id)
+  where to_char(osp.paytime,'yyyymm') = '${month}'
+) osp
+inner join (
+    select b.order_id,b.site_id
+    from popopiedc.dwd_order_order_appendix b
+    where upper(nvl(b.pay_type,'others')) not in ('货到付款','COD')
+    group by b.order_id,b.site_id
+    union all
+    select b.order_id,b.site_id
+    from popopiedc.dwd_order_order_appendix b
+    where upper(b.pay_type)  in ('货到付款','COD') and b.site_order_status !='处理中' and lower(b.sys_source) = 'oms' -- erp只拉取site_order_status =2的数据
+    group by b.order_id,b.site_id
+    union all
+    select b.order_id,b.site_id
+    from popopiedc.dwd_order_order_appendix b
+    where upper(b.pay_type)  in ('货到付款','COD') and lower(b.sys_source) = 'erp'
+    group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+where 1=1 and (osp.change_type in ('下单','补发') or (osp.change_details_type = '替换上' and osp.change_type = '换货') or (change_details_type = '原单商品取消' and change_type = '取消'))
+group by
+   ooa.site_id
+  ,osp.order_no
+  ,osp.order_id
+  ,osp.order_amt
+  ,nvl(osp.sku_erp_id,osp.sku_id)
+  ,osp.spu_no
+  ,osp.currency_name
+  ,nvl(osp.erp_order_id,osp.order_id)
+  ,to_char(osp.paytime,'yyyymmdd')
+;
+
+
+
+@weight_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.sku_erp_id
+    ,t.spu_no
+    ,t.good_price_currency -- 订单物品总金额
+    ,t.current_sku_qty -- 订单物品总数量
+    ,t.currency_name
+    ,t.operate_type
+    ,t.pay_date
+    ,t.erp_order_id
+    ,sum(if(t.operate_type = '取消',0,t.current_sku_qty)) over (partition by t.order_id ) as sum_counts
+    ,sum(if(t.operate_type = '取消',0,t.good_price_currency)) over (partition by t.order_id ) as sum_amount
+from
+(
+  select
+     gsi.site_id
+    ,gsi.order_no
+    ,gsi.order_id
+    ,gsi.order_amt
+    ,gsi.sku_erp_id
+    ,gsi.spu_no
+    ,gsi.good_price_currency -- 订单物品总金额
+    ,gsi.current_sku_qty -- 订单物品总数量
+    ,gsi.currency_name
+    ,gsi.operate_type
+    ,gsi.erp_order_id
+    ,gsi.pay_date
+  from @order_goods_sale_info gsi
+) t
+;
+
+@price_rate_oms:=
+select
+     wp.site_id
+    ,wp.order_no
+    ,wp.order_id
+    ,wp.order_amt
+    ,wp.sku_erp_id
+    ,wp.spu_no
+    ,wp.good_price_currency -- 订单物品总金额
+    ,wp.current_sku_qty -- 订单物品总数量
+    ,wp.currency_name
+    ,wp.operate_type
+    ,wp.sum_counts
+    ,wp.sum_amount
+    ,case when wp.sum_amount<> 0 then wp.good_price_currency/wp.sum_amount
+          when wp.sum_counts= 0 then 0
+          else current_sku_qty/sum_counts
+     end as price_rate
+    ,wp.pay_date
+    ,wp.erp_order_id
+from @weight_price_oms wp
+;
+
+
+@goods_pre_price_oms:=
+select
+     t.site_id
+    ,t.order_no
+    ,t.order_id
+    ,t.order_amt
+    ,t.spu_no
+    ,t.good_price_currency -- 订单物品总金额
+    ,t.current_sku_qty -- 订单物品总数量
+    ,t.currency_name
+    ,t.operate_type
+    ,t.sum_counts
+    ,t.sum_amount
+    ,t.price_rate
+    ,t.order_amt*t.price_rate as pre_price
+    ,t.erp_order_id
+    ,t.sku_erp_id
+    ,t.pay_date
+    ,nvl(t1.product_type,'现货款') as product_type
+    ,case when nvl(t1.product_type,'现货款')  = '现货款' then t.order_amt*t.price_rate else 0 end as spots_gmv
+    ,case when nvl(t1.product_type,'现货款')  = '生产款' then t.order_amt*t.price_rate else 0 end as produce_gmv
+from @price_rate_oms t
+left join @product_type_info t1
+on (t.spu_no = t1.product_no)
+;
+
+
+-- 订单系统使用费   and  采购服务费
+insert overwrite table dwd_looklook_product_type_purchase_shop_fees partition (mt = '${month}')
+select
+     ppo.site_id as erp_site_id
+    ,soi.site_id
+    ,soi.site_name
+    ,soi.business_unit_name
+    ,ppo.order_no
+    ,ppo.order_id
+    ,ppo.order_amt
+    ,ppo.spu_no
+    ,ppo.good_price_currency
+    ,ppo.current_sku_qty
+    ,ppo.currency_name
+    ,ppo.operate_type
+    ,ppo.sum_counts
+    ,ppo.sum_amount
+    ,ppo.price_rate
+    ,ppo.pre_price
+    ,ppo.erp_order_id
+    ,ppo.sku_erp_id
+    ,ppo.pay_date
+    ,ppo.product_type
+    ,ppo.spots_gmv
+    ,ppo.produce_gmv
+    ,ppo.spots_gmv*(0.75/100) as spots_shop_order_use_fees
+    ,ppo.produce_gmv*(1.54/100) as produce_shop_order_use_fees
+    ,ppo.spots_gmv*(0.80/100) as spots_purchase_service_fees
+    ,ppo.produce_gmv*(1.64/100) as produce_purchase_service_fees
+    ,cct.currency_transform as to_usd_rate
+    ,cct.currency_transform_cny as to_cny_rate
+    ,'${month}' as data_month
+from @goods_pre_price_oms ppo
+left join dwd_com_currency_transform cct
+on (ppo.pay_date = cct.data_dt and ppo.currency_name = cct.currency_code and cct.pt= max_pt('dwd_com_currency_transform'))
+left join opdc.dim_site ds
+on (ppo.site_id = ds.site_id)
+left join dwd_com_site_org_info soi
+on (ds.ops_site_id = soi.site_id and soi.pt ='${date}')
+;
+
+

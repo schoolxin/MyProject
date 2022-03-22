@@ -1,0 +1,159 @@
+@tax_fee_info_pre:=
+select
+    bta.deliverytime
+   ,upper(bta.expressno) as expressno
+   ,bta.actualtaxfee
+   ,case when bta.actualcurrency = 'RMB' then 'CNY' else bta.actualcurrency end as actualcurrency
+from
+(
+  select
+      bta.deliverytime
+     ,bta.expressno
+     ,bta.actualtaxfee
+     ,bta.actualcurrency
+     ,row_number() over (partition by bta.expressno,bta.deliverytime,bta.actualtaxfee order by bta.levels asc) as rn
+  from
+  (
+    select
+      nvl(b.logistics_delivery_time,bta.deliverytime) as deliverytime
+     ,bta.expressno
+     ,bta.actualtaxfee
+     ,1 as levels
+     ,bta.actualcurrency
+    from ods_erp_erp_view_finance_codtaxfeebacktoarticle bta
+    left join
+    (
+      select b.express_no,b.logistics_delivery_time, row_number() over (partition by b.express_no  order by b.create_time  desc) as rn
+      from ods_erp_erp_finance_cod_shipment_back_to_article b where b.pt = max_pt('ods_erp_erp_finance_cod_shipment_back_to_article')
+    ) b
+    on (upper(bta.expressno) = upper(b.express_no) and b.rn =1)
+    where bta.pt = max_pt('ods_erp_erp_view_finance_codtaxfeebacktoarticle') and to_char(bta.deliverytime,'yyyymmdd')>='20211001'
+    union all
+    select
+      nvl(b.logistics_delivery_time,bta.deliverytime) as deliverytime
+     ,bta.expressno
+     ,bta.actualtaxfee
+     ,1 as levels
+     ,bta.actualcurrency
+    from ods_erp_erp_popopie_view_finance_codtaxfeebacktoarticle bta
+    left join
+    (
+      select b.express_no,b.logistics_delivery_time, row_number() over (partition by b.express_no  order by b.create_time  desc) as rn
+      from ods_erp_erp_popopie_finance_cod_shipment_back_to_article b where b.pt = max_pt('ods_erp_erp_popopie_finance_cod_shipment_back_to_article')
+    ) b
+    on (upper(bta.expressno) = upper(b.express_no) and b.rn =1)
+    where bta.pt = max_pt('ods_erp_erp_popopie_view_finance_codtaxfeebacktoarticle') and to_char(bta.deliverytime,'yyyymmdd')>='20211201'
+  ) bta
+) bta
+where bta.rn = 1
+;
+
+create table tmp_taxfee_202112_old
+as
+select
+    a.expressno
+   ,to_char(a.deliverytime,'yyyymmdd') as data_dt
+   ,a.actualtaxfee*cct.currency_transform as actualtaxfee_usd
+   ,a.actualtaxfee*cct.currency_transform_cny as actualtaxfee_cny
+   ,a.actualtaxfee
+   ,a.actualcurrency as currency_code
+from @tax_fee_info_pre a
+left join dwd_com_currency_transform cct
+on to_char(a.deliverytime,'yyyymmdd')= cct.data_dt and upper(a.actualcurrency) = cct.currency_code and cct.pt = max_pt('dwd_com_currency_transform')
+where to_char(a.deliverytime,'yyyymm') = '202112';
+
+
+
+show partitions app_looklook_st_financial_summary_oms_cod;
+
+show partitions ods_erp_erp_view_finance_codtaxfeebacktoarticle;
+
+
+alter table ods_erp_erp_popopie_finance_cod_shipment_back_to_article set lifecycle 36500;
+
+
+
+select a.pt,sum(a.actualtaxfee_cny) as actualtaxfee_cny,a.site_id,a.data_dt,sum(a.gmv_cny) as gmv_cny
+from app_looklook_st_financial_summary_oms_cod a
+where a.data_dt = '20211225' and a.pt <='${date}' and a.site_id in (19081) group by a.pt,a.site_id,a.data_dt
+;
+
+
+
+
+select *
+from ods_erp_erp_view_finance_codtaxfeebacktoarticle tt
+where tt.pt = '${date}' and tt.expressno in (
+'16895560',
+'16895565',
+'16895574',
+'16895575',
+'16895581',
+'16895591',
+'16895608',
+'16895612',
+'16895621',
+'16895632',
+'16895636',
+'16895638',
+'16895645',
+'16895647',
+'33994812062',
+'33994812983',
+'33994813075',
+'33994813086',
+'33994813193',
+'6122421146602',
+'6122521549973',
+'6122521844640',
+'6122521902300',
+'CNB20402172',
+'CNB20402191',
+'CNB20402204',
+'CNB20402205',
+'CNB20402218',
+'CNB20402601'
+);
+
+
+
+
+select *
+from ods_erp_erp_finance_cod_shipment_back_to_article a
+where a.pt = '${date}' and a.express_no
+in (
+'16895560',
+'16895565',
+'16895574',
+'16895575',
+'16895581',
+'16895591',
+'16895608',
+'16895612',
+'16895621',
+'16895632',
+'16895636',
+'16895638',
+'16895645',
+'16895647',
+'33994812062',
+'33994812983',
+'33994813075',
+'33994813086',
+'33994813193',
+'6122421146602',
+'6122521549973',
+'6122521844640',
+'6122521902300',
+'CNB20402172',
+'CNB20402191',
+'CNB20402204',
+'CNB20402205',
+'CNB20402218',
+'CNB20402601'
+);
+
+
+
+select distinct tt.expressno from opdc.dw_logistics_package_shipments tt where tt.siteid = '43256' and to_char(tt.deliverytime,'yyyymmdd') = '20211225';
+

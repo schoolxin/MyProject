@@ -1,0 +1,477 @@
+--- 获取每个月月末的事业部名称
+@site_org_info:=
+select
+     t.site_id
+    ,t.site_type_id
+    ,t.site_name
+    ,t.business_unit_name
+    ,t.business_unit_id
+from
+(
+    select
+        substring(a.pt,1,6) as date_month,
+        a.site_id,
+        a.site_type_id,
+        a.site_name,
+        a.business_unit_name,
+        a.business_unit_id,
+        a.pt,
+        row_number() over (partition by substring(a.pt,1,6),a.site_id order by a.pt desc) as rn
+  from dwd_com_site_org_info a
+  where substring(a.pt,1,6) = '${month}'
+) t
+where t.rn=1
+;
+-- 选款人 与事业部对应关系
+@user_bu_mapping:=
+select a.choose_user_name,a.month,nvl(b.business_unit_name,a.business_name) as business_name,a.business_unit_id
+from static_choose_user_bu_mapping a
+left join (select b.business_unit_name,b.business_unit_id from @site_org_info b group by b.business_unit_name,b.business_unit_id) b
+on (a.business_unit_id =b.business_unit_id)
+where pt = max_pt('static_choose_user_bu_mapping');
+
+@spu_choose_date:=
+select
+     t1.product_no
+    ,to_char(t1.choose_date,'yyyymmdd') as choose_date
+    ,t1.choose_user_name
+    ,to_char(t1.choose_date,'yyyymm') as choose_month
+    ,t1.supply_price
+    ,t1.purchase_guide_max_price
+    ,t1.purchase_guide_min_price
+from
+(
+    select
+      t.product_no,
+      t.choose_date,
+      t.choose_user_name,
+      t.system,
+      t.supply_price,
+      t.purchase_guide_max_price,
+      t.purchase_guide_min_price
+    from
+    (
+        select
+          t.product_no,
+          t.choose_date,
+          row_number() over (partition by t.product_no order by t.levels asc) as rn,
+          t.system,
+          t.supply_price,
+          t.purchase_guide_max_price,
+          t.purchase_guide_min_price,
+          t.choose_user_name
+        from
+        (
+          select
+            a.product_no,
+            a.choose_date as choose_date,
+            if(lower(nvl(a.system,'other'))='lms',1,2) as levels, --优先从lms系统取 取不到再从其他系统取
+            a.system,
+            a.supply_price,
+            a.purchase_guide_max_price,
+            a.purchase_guide_min_price,
+            a.first_choose_user_name as choose_user_name
+          from opdc.dim_spu a
+          union all
+          select
+            a.product_no,
+            a.choose_date as choose_date,
+            if(lower(nvl(a.system,'other'))='lms',1,2) as levels, --优先从lms系统取 取不到再从其他系统取
+            a.system,
+            a.supply_price,
+            a.purchase_guide_max_price,
+            a.purchase_guide_min_price,
+            a.first_choose_user_name as choose_user_name
+          from popopiedc.dim_spu a
+        ) t
+    ) t
+    where t.rn =1
+) t1
+where to_char(t1.choose_date,'yyyymmdd')>='20211001' and to_char(t1.choose_date,'yyyymm')<='${month}'
+;
+
+-- 开款人与事业部 对应表 根据该表 找到spu 对应的站点
+@choose_spu_bu_mapping:=
+select
+   bm.choose_user_name
+  ,bm.business_name
+  ,bm.business_unit_id
+  ,cd.choose_date
+  ,cd.product_no
+  ,cd.supply_price
+  ,cd.purchase_guide_max_price
+  ,cd.purchase_guide_min_price
+  ,count(1) over (partition by cd.product_no) as product_belong_cnt -- spu 归属的事业部数量
+from @user_bu_mapping bm
+inner join @spu_choose_date cd
+on (bm.month = cd.choose_date and bm.choose_user_name = cd.choose_user_name)
+;
+
+
+--select * from @choose_spu_bu_mapping t where t.choose_user_name ='戴蓉';
+
+
+@product_stock_info:=
+select
+  a.product_no,
+  sum(a.inventory_qty) as stock_amt
+from opdc.dw_erp_stock_goods_history a --从切换的那天开始 没有有宝宝派的数据
+where a.pt='${date}' and a.product_no is not null
+group by a.product_no
+union all
+select
+  a.product_no,
+  sum(a.inventory_qty) as stock_amt
+from popopiedc.dw_erp_stock_goods_history a --从切换的那天开始 只有宝宝派的数据
+where a.pt='${date}' and a.product_no is not null
+group by a.product_no;
+
+@erp_spu_info:=
+select
+   scd.product_no
+  ,case
+       when psp.product_avg_cost!=0 then product_avg_cost
+       when scd.supply_price!=0 then supply_price
+       when scd.purchase_guide_max_price!=0 then purchase_guide_max_price
+       when scd.purchase_guide_min_price!=0 then purchase_guide_min_price
+   end as product_cost
+  ,nvl(psi.stock_amt,0) as stock_amt
+  ,scd.choose_date
+  ,scd.choose_user_name
+  ,scd.business_name
+  ,scd.product_belong_cnt
+  ,scd.business_unit_id
+from @choose_spu_bu_mapping scd
+left join
+(
+    select
+      ps.old_no as product_no,
+      nvl(avg(pg.cost),0) as product_avg_cost,
+      'erp' as source
+    from ods_erp_erp_purchase_goods pg
+    inner join ods_erp_erp_product_spu ps
+    on (pg.spu_id = ps.id and ps.pt = max_pt('ods_erp_erp_product_spu'))
+    where pg.pt = '20211031' and substring(pg.pt,1,6) = '${month}'
+    group by ps.old_no
+    union all
+    select
+      dsp.product_no
+     ,dsp.avg_purchase_price
+     ,dsp.source
+    from
+    (
+        select
+          dsp.product_no
+         ,dsp.avg_purchase_price
+         ,dsp.source
+         ,row_number() over (partition by substring(dsp.pt,1,6),dsp.product_no order by dsp.pt desc) as rn
+        from
+        (
+            select
+            a.product_no,
+            nvl(a.avg_purchase_price,0) as avg_purchase_price,
+            'opdc' as source,
+            a.pt
+          from opdc.dim_spu_price a
+          where substring(a.pt,1,6) = '${month}' and a.pt>='20211101'
+          union all
+          select
+              a.product_no,
+              nvl(a.avg_purchase_price,0) as avg_purchase_price,
+              'opdc' as source,
+              a.pt
+          from popopiedc.dim_spu_price a
+          where substring(a.pt,1,6) = '${month}' and a.pt>='20211101'
+        ) dsp
+    ) dsp
+    where dsp.rn =1
+) psp
+on (scd.product_no = psp.product_no)
+left join @product_stock_info psi
+on (scd.product_no = psi.product_no)
+;
+@devalue_rate:=
+select
+  t.proudct_spu
+ ,max(t.rate) as  rate
+from
+(
+  select
+  *
+  from
+  (
+    select row_number() over (partition by a.product order by a.pt desc) as rn,a.id,a.product as proudct_spu,a.rate
+    from opdc.stock_rate a  -- 后面要加一个宝宝派的
+    where substring(a.pt,1,6)='${month}'
+  ) t
+  where t.rn =1
+  union all
+  select
+  *
+  from
+  (
+    select row_number() over (partition by a.product order by a.pt desc) as rn,a.id,a.product as proudct_spu,a.rate
+    from popopiedc.stock_rate a  -- 后面要加一个宝宝派的
+    where substring(a.pt,1,6)='${month}'
+  ) t
+  where t.rn =1
+) t
+group by t.proudct_spu
+;
+-- 减值金额先分摊到事业部 再从事业部分摊到下属站点上 按事业部spu的销量进行均摊  先圈定事业部(就是先用财务提供的spu与事业部的对应关系过滤出符合条件的spu+事业部，然后在这些符合条件的事业部间均摊spu的减值金额)
+@spu_stock_devalue:=
+select
+    esi.product_no
+   ,esi.business_name
+   ,esi.business_unit_id
+   ,esi.choose_user_name
+   ,esi.choose_date
+   ,esi.stock_amt
+   ,esi.product_cost
+   ,esi.product_belong_cnt
+   ,esi.stock_amt*esi.product_cost as stock_value
+   ,esi.stock_amt*esi.product_cost*nvl(dr.rate,0) as stock_devalue
+from @erp_spu_info esi
+left join @devalue_rate dr
+on (esi.product_no = dr.proudct_spu)
+;
+--spu销售数量
+-- 收入 算出每个站点spu销售数量和该spu的总销售数量
+@site_product_sale_cnt_history:=
+select
+    t.spu_no as product_spu
+   ,t.product_sale_cnt_site
+   ,t.erp_site_id
+   ,ds.ops_site_id
+from
+(
+      select
+        osp.spu_no
+       ,ooa.site_id as erp_site_id
+       ,sum(osp.sales_qty) as product_sale_cnt_site
+    from
+    (
+      select osp.currency_name as currency_code ,osp.order_amt,osp.spu_no,sum(osp.sales_qty) as sales_qty,osp.order_no,osp.order_id as order_id,osp.paytime
+      from opdc.dwd_order_sales_process osp
+      where osp.change_type = '下单' and to_char(osp.paytime,'yyyymmdd')>='20211001' and osp.spu_no is not null and to_char(osp.paytime,'yyyymm') <= '${month}'
+      and osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0)
+      group by osp.currency_name,osp.order_amt,osp.order_id,osp.spu_no,osp.order_no,osp.paytime
+    ) osp
+    inner join (
+        select b.order_id,b.site_id
+          from opdc.dwd_order_order_appendix b
+          where upper(nvl(b.pay_type,'others')) not in ('货到付款','COD')
+          group by b.order_id,b.site_id
+          union all
+          select b.order_id,b.site_id
+          from opdc.dwd_order_order_appendix b
+          where upper(b.pay_type)  in ('货到付款','COD') and b.site_order_status !='处理中' and lower(b.sys_source) = 'oms' -- erp只拉取site_order_status =2的数据
+          group by b.order_id,b.site_id
+          union all
+          select b.order_id,b.site_id
+          from opdc.dwd_order_order_appendix b
+          where upper(b.pay_type)  in ('货到付款','COD') and lower(b.sys_source) = 'erp'
+          group by b.order_id,b.site_id
+    ) ooa
+    on (osp.order_id = ooa.order_id)
+    group by
+       osp.spu_no
+      ,ooa.site_id
+) t
+inner join (select ds.site_id,ds.ops_site_id,row_number() over (partition by ds.site_id order by ds.start_time desc) as rn from opdc.dim_site ds) ds
+on (t.erp_site_id = ds.site_id and rn=1)
+-- 宝宝派
+union all
+select
+    t.spu_no as product_spu
+   ,t.product_sale_cnt_site
+   ,t.erp_site_id
+   ,ds.ops_site_id
+from
+(
+      select
+        osp.spu_no
+       ,ooa.site_id as erp_site_id
+       ,sum(osp.sales_qty) as product_sale_cnt_site
+    from
+    (
+      select osp.currency_name as currency_code ,osp.order_amt,osp.spu_no,sum(osp.sales_qty) as sales_qty,osp.order_no,osp.order_id as order_id,osp.paytime
+      from popopiedc.dwd_order_sales_process osp
+      where osp.change_type = '下单' and to_char(osp.paytime,'yyyymmdd')>='20211001' and osp.spu_no is not null and to_char(osp.paytime,'yyyymm') <= '${month}'
+      and osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+      group by osp.currency_name,osp.order_amt,osp.order_id,osp.spu_no,osp.order_no,osp.paytime
+    ) osp
+    inner join (
+        select b.order_id,b.site_id
+          from popopiedc.dwd_order_order_appendix b
+          where upper(nvl(b.pay_type,'others')) not in ('货到付款','COD')
+          group by b.order_id,b.site_id
+          union all
+          select b.order_id,b.site_id
+          from popopiedc.dwd_order_order_appendix b
+          where upper(b.pay_type)  in ('货到付款','COD') and b.site_order_status !='处理中' and lower(b.sys_source) = 'oms' -- erp只拉取site_order_status =2的数据
+          group by b.order_id,b.site_id
+          union all
+          select b.order_id,b.site_id
+          from popopiedc.dwd_order_order_appendix b
+          where upper(b.pay_type)  in ('货到付款','COD') and lower(b.sys_source) = 'erp'
+          group by b.order_id,b.site_id
+    ) ooa
+    on (osp.order_id = ooa.order_id)
+    group by
+       osp.spu_no
+      ,ooa.site_id
+) t
+inner join (select ds.site_id,ds.ops_site_id,row_number() over (partition by ds.site_id order by ds.start_time desc) as rn from opdc.dim_site ds) ds
+on (t.erp_site_id = ds.site_id and rn=1)
+;
+--select * from @site_product_sale_cnt_history a where a.ops_site_id = '18578';
+
+
+@ops_site_sale_cnt_info:=
+select
+     soi.business_unit_name
+    ,soi.site_id
+    ,soi.site_name
+    ,soi.site_type_id
+    ,sch.product_spu
+    ,sch.product_sale_cnt_site
+    ,soi.business_unit_id
+from @site_product_sale_cnt_history sch
+inner join @site_org_info soi
+on (sch.ops_site_id = soi.site_id)
+;
+
+@ops_bu_sale_cnt_info:=
+select
+   t.business_unit_name
+  ,t.product_spu
+  ,sum(t.product_sale_cnt_site) as product_sale_cnt_bu
+  ,t.business_unit_id
+from @ops_site_sale_cnt_info t
+group by t.business_unit_name,t.product_spu,t.business_unit_id
+;
+--事业部 收入均摊
+@bu_sale_weight_pre:=
+select
+  nvl(sci.business_unit_name,sbm.business_name) as business_name
+ ,sbm.product_no
+ ,nvl(sci.product_sale_cnt_bu,0) as product_sale_cnt_bu
+ ,sbm.product_belong_cnt
+ ,sum(nvl(sci.product_sale_cnt_bu,0)) over (partition by sbm.product_no) as product_sale_cnt_total
+ ,sbm.business_unit_id
+from @choose_spu_bu_mapping sbm
+left join @ops_bu_sale_cnt_info sci
+on (sbm.product_no = sci.product_spu and sbm.business_unit_id = sci.business_unit_id)
+;
+
+-- 事业部跟spu对应关系为主表，能关联到收入的按收入均摊到事业部  某个SPU只要有一个事业部在卖 就需要按收入均摊，其他事业部如果没有收入  就不均摊，如果SPU 在归属的事业部都没有销量就按1/事业部数量均摊
+@bu_sale_weight:=
+select
+   swp.business_name
+  ,swp.product_no
+  ,swp.product_sale_cnt_bu
+  ,swp.product_sale_cnt_total
+  ,swp.product_belong_cnt
+  ,swp.business_unit_id
+  ,case when swp.product_sale_cnt_total = 0 then 1/product_belong_cnt else swp.product_sale_cnt_bu/swp.product_sale_cnt_total end as weight_rate
+from @bu_sale_weight_pre swp
+;
+
+-- 先到事业部 再把费用均摊到每个站点上 如果事业部下面没有站点  就放在事业部 如果事业部下的站点没有收入 就按1/站点数据摊
+-- 事业部均摊
+@business_daily_product_stock_devalue_info:=
+select
+   a.product_no
+  ,a.business_name
+  ,a.product_sale_cnt_bu
+  ,a.product_sale_cnt_total
+  ,a.product_belong_cnt --spu归属于那些事业部
+  ,a.weight_rate as weight_rate_bu -- 事业部均摊系数
+  ,b.product_cost
+  ,b.stock_amt
+  ,b.choose_date
+  ,b.choose_user_name
+  ,b.stock_value
+  ,b.stock_devalue
+from @bu_sale_weight a
+inner join @spu_stock_devalue b
+on (a.product_no = b.product_no and a.business_unit_id = b.business_unit_id)
+;
+
+--开款人对应事业部的站点信息
+@choose_site_mapping:=
+select
+    nvl(soi.business_unit_name,sbm.business_name) as business_name
+   ,sbm.business_unit_id
+   ,sbm.product_no
+   ,sbm.choose_user_name
+   ,sbm.choose_date
+   ,soi.site_name
+   ,soi.site_id
+   ,count(distinct soi.site_id) over (partition by sbm.product_no,sbm.business_unit_id) as product_belong_site_cnt -- spu 在事业部绑定的站点数
+from @choose_spu_bu_mapping sbm
+left join @site_org_info soi
+on (sbm.business_unit_id = soi.business_unit_id)
+--where sbm.product_no = 'SP21100680IG'
+;
+
+@site_sale_weight_pre:=
+select
+    csm.product_no
+   ,csm.business_name
+   ,csm.site_id
+   ,csm.site_name
+   ,csm.product_belong_site_cnt
+   ,nvl(sci.product_sale_cnt_site,0) as product_sale_cnt_site
+   ,sum(nvl(sci.product_sale_cnt_site,0)) over (partition by csm.product_no,csm.business_name) as product_sale_cnt_bu --spu在事业部的总销量
+from @choose_site_mapping csm
+left join @ops_site_sale_cnt_info sci
+on (csm.product_no = sci.product_spu and csm.business_name = sci.business_unit_name and csm.site_id = sci.site_id)
+;
+-- 站点均摊系数逻辑
+@site_sale_weight:=
+select
+   swp.business_name
+  ,swp.product_no
+  ,swp.product_belong_site_cnt
+  ,swp.product_sale_cnt_site
+  ,swp.product_sale_cnt_bu
+  ,swp.site_name
+  ,swp.site_id
+  ,case when swp.product_belong_site_cnt = 0 then -999  -- -999表示当前事业没有站点
+        when swp.product_sale_cnt_bu = 0 then 1/product_belong_site_cnt
+        else swp.product_sale_cnt_site/swp.product_sale_cnt_bu
+   end as weight_rate
+from @site_sale_weight_pre swp
+;
+
+
+insert overwrite table dwd_looklook_proudct_stock_devalue_info partition(mt= '${month}')
+select
+   '${month}' as data_mt
+  ,sdi.product_no
+  ,sdi.business_name
+  ,sdi.choose_user_name
+  ,sdi.choose_date
+  ,sdi.product_belong_cnt --spu归属于那些事业部
+  ,sdi.product_sale_cnt_total --spu 在归属事业部总销量
+  ,sdi.product_sale_cnt_bu --spu 在归属事业部销量
+  ,sdi.weight_rate_bu as weight_rate_bu -- 事业部均摊系数
+  ,sdi.stock_amt --spu月末库存数量
+  ,sdi.stock_value --spu存货金额
+  ,sdi.stock_devalue -- spu存货减值金额
+  ,nvl(ssw.site_id,0) as site_id
+  ,nvl(ssw.site_name,sdi.business_name) as site_name
+  ,ssw.product_belong_site_cnt --spu 在归属事业部中绑定的站点数
+  ,ssw.product_sale_cnt_site --spu 在归属事业部下属站点的销量
+  ,ssw.product_sale_cnt_bu as product_sale_cnt_bu_ssw --spu 在归属事业部销量
+  ,ssw.weight_rate as weight_rate_site --站点均摊系数
+  ,sdi.weight_rate_bu*sdi.stock_devalue as product_stock_devalue_bu --事业部存货减值金额
+  ,if(ssw.weight_rate = -999,sdi.weight_rate_bu*sdi.stock_devalue,ssw.weight_rate*sdi.weight_rate_bu*sdi.stock_devalue) as  product_stock_devalue_site-- 站点存货减值金额
+  ,sdi.product_cost
+from @business_daily_product_stock_devalue_info sdi
+left join @site_sale_weight ssw
+on (sdi.business_name = ssw.business_name and sdi.product_no = ssw.product_no)
+--where sdi.product_no  in ('SP211006BPIC','SP21100680IG')
+;

@@ -1,0 +1,443 @@
+--name:dwd_looklook_product_purchase_cost_against
+--author:order
+--create time:2021-11-29 11:21
+-- 减值率
+@devalue_rate_pre:=
+select a.product as proudct_spu,max(a.rate) as rate,a.pt as data_dt
+from opdc.stock_rate a
+where substring(a.pt,1,6)<='${month}'
+group by a.product,a.pt
+;
+-- 用10月10号的减值率 弥补9.30到10.9号的
+@devalue_rate_pre1:=
+select
+ /* + mapjoin(dcc) */
+  dcc.data_dt
+ ,drp.proudct_spu
+ ,drp.rate
+from
+(
+  select
+    string(a.date_id) as data_dt
+  from dim_com_calender a
+  where a.date_id between '20210930' and '20211009'
+) dcc
+,
+(
+  select * from @devalue_rate_pre a where a.data_dt = '20211010'
+) drp
+union all
+select
+   drr.data_dt
+  ,drr.proudct_spu
+  ,drr.rate
+from @devalue_rate_pre drr
+union all
+select
+   drr.pt as data_dt
+  ,drr.product as proudct_spu
+  ,drr.rate
+from popopiedc.stock_rate drr
+where substring(drr.pt,1,6)<='${month}'
+;
+-- 由于有的spu 宝宝派和 澳鹏都有 因此这里对于相同的spu 取最大的减值率
+@devalue_rate:=
+select
+   drp.data_dt,drp.proudct_spu,max(drp.rate) as rate
+from @devalue_rate_pre1 drp
+group by drp.data_dt,drp.proudct_spu
+;
+
+select * from @devalue_rate;
+
+-- 获取spu的销售数量以及销售时间
+@order_info:=
+select
+    to_char(osp.paytime,'yyyymmdd') as order_date
+   ,osp.currency_code
+   ,osp.order_amt
+   ,osp.spu_no
+   ,osp.order_no
+   ,osp.order_id
+   ,ooa.site_id
+   ,osp.sales_qty as product_sale_cnt
+from
+(
+  select osp.currency_name as currency_code ,osp.order_amt,osp.spu_no,sum(osp.sales_qty) as sales_qty,osp.order_no,osp.order_id as order_id,osp.paytime
+  from opdc.dwd_order_sales_process osp
+  where osp.change_type = '下单' and to_char(osp.paytime,'yyyymmdd')>='20211001' and osp.spu_no is not null and to_char(osp.paytime,'yyyymm') = '${month}'
+  and osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0)
+  group by osp.currency_name,osp.order_amt,osp.order_id,osp.spu_no,osp.order_no,osp.paytime
+) osp
+inner join (
+    select b.order_id,b.site_id
+      from opdc.dwd_order_order_appendix b
+      where upper(nvl(b.pay_type,'others')) not in ('货到付款','COD')
+      group by b.order_id,b.site_id
+      union all
+      select b.order_id,b.site_id
+      from opdc.dwd_order_order_appendix b
+      where upper(b.pay_type)  in ('货到付款','COD') and b.site_order_status !='处理中' and lower(b.sys_source) = 'oms' -- erp只拉取site_order_status =2的数据
+      group by b.order_id,b.site_id
+      union all
+      select b.order_id,b.site_id
+      from opdc.dwd_order_order_appendix b
+      where upper(b.pay_type)  in ('货到付款','COD') and lower(b.sys_source) = 'erp'
+      group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+
+-- 宝宝派
+union all
+select
+    to_char(osp.paytime,'yyyymmdd') as order_date
+   ,osp.currency_code
+   ,osp.order_amt
+   ,osp.spu_no
+   ,osp.order_no
+   ,osp.order_id
+   ,ooa.site_id
+   ,osp.sales_qty as product_sale_cnt
+from
+(
+  select osp.currency_name as currency_code ,osp.order_amt,osp.spu_no,sum(osp.sales_qty) as sales_qty,osp.order_no,osp.order_id as order_id,osp.paytime
+  from popopiedc.dwd_order_sales_process osp
+  where osp.change_type = '下单' and to_char(osp.paytime,'yyyymmdd')>='20211001' and osp.spu_no is not null and to_char(osp.paytime,'yyyymm') = '${month}'
+  and osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+  group by osp.currency_name,osp.order_amt,osp.order_id,osp.spu_no,osp.order_no,osp.paytime
+) osp
+inner join (
+    select b.order_id,b.site_id
+      from popopiedc.dwd_order_order_appendix b
+      where upper(nvl(b.pay_type,'others')) not in ('货到付款','COD')
+      group by b.order_id,b.site_id
+      union all
+      select b.order_id,b.site_id
+      from popopiedc.dwd_order_order_appendix b
+      where upper(b.pay_type)  in ('货到付款','COD') and b.site_order_status !='处理中' and lower(b.sys_source) = 'oms' -- erp只拉取site_order_status =2的数据
+      group by b.order_id,b.site_id
+      union all
+      select b.order_id,b.site_id
+      from popopiedc.dwd_order_order_appendix b
+      where upper(b.pay_type)  in ('货到付款','COD') and lower(b.sys_source) = 'erp'
+      group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+;
+
+--select * from @order_info t where t.spu_no = 'SP211113LSAG';
+
+@order_info_product_stock_devalue_rate:=
+select
+   t.spu_no
+  ,t.order_id
+  ,t.order_no
+  ,t.order_amt
+  ,t.product_sale_cnt
+  ,t.site_id
+  ,t.rate
+  ,t.order_date
+  ,t.lastest_devalue_date
+from
+(
+    select
+     oi.spu_no
+    ,oi.order_id
+    ,oi.order_no
+    ,oi.order_amt
+    ,oi.product_sale_cnt
+    ,oi.site_id
+    ,row_number() over (partition by oi.order_no,oi.order_id,oi.spu_no order by nvl(dr.data_dt,'99991231') desc) as rn
+    ,nvl(dr.rate,0) as rate
+    ,oi.order_date
+    ,dr.data_dt as lastest_devalue_date --最近一次的减值率日期
+  from @order_info oi
+  left join @devalue_rate dr
+  on (oi.spu_no = dr.proudct_spu and oi.order_date>dr.data_dt)
+) t
+where t.rn = 1
+;
+
+
+
+--选款日期
+@spu_choose_date:=
+select
+    t1.*
+from
+(
+    select
+      t.product_no,
+      t.choose_date,
+      t.choose_user_name,
+      t.system,
+      t.supply_price,
+      t.purchase_guide_max_price,
+      t.purchase_guide_min_price
+    from
+    (
+        select
+          t.product_no,
+          t.choose_date,
+          row_number() over (partition by t.product_no order by t.levels asc) as rn,
+          t.system,
+          t.supply_price,
+          t.purchase_guide_max_price,
+          t.purchase_guide_min_price,
+          t.choose_user_name
+        from
+        (
+          select
+            a.product_no,
+            a.choose_date as choose_date,
+            if(lower(nvl(a.system,'other'))='lms',1,2) as levels, --优先从lms系统取 取不到再从其他系统取
+            a.system,
+            a.supply_price,
+            a.purchase_guide_max_price,
+            a.purchase_guide_min_price,
+            a.first_choose_user_name as choose_user_name
+          from opdc.dim_spu a
+          union all
+          -- 宝宝派
+          select
+            a.product_no,
+            a.choose_date as choose_date,
+            if(lower(nvl(a.system,'other'))='lms',1,2) as levels, --优先从lms系统取 取不到再从其他系统取
+            a.system,
+            a.supply_price,
+            a.purchase_guide_max_price,
+            a.purchase_guide_min_price,
+            a.first_choose_user_name as choose_user_name
+          from popopiedc.dim_spu a
+        ) t
+    ) t
+    where t.rn =1
+) t1
+where to_char(t1.choose_date,'yyyymm')<='${month}'
+;
+
+
+-- 采购成本
+@erp_spu_info:=
+select
+  scd.product_no,
+  case when psp.product_avg_cost!=0 then product_avg_cost
+       when scd.supply_price!=0 then supply_price
+       when scd.purchase_guide_max_price!=0 then purchase_guide_max_price
+       when scd.purchase_guide_min_price!=0 then purchase_guide_min_price
+  end as product_cost,
+  psp.source,
+  scd.choose_date,
+  scd.choose_user_name
+from @spu_choose_date scd
+left join
+(
+  select
+    ps.old_no as product_no,
+    nvl(avg(pg.cost),0) as product_avg_cost,
+    'erp' as source
+  from ods_erp_erp_purchase_goods pg
+  inner join ods_erp_erp_product_spu ps
+  on (pg.spu_id = ps.id and ps.pt = max_pt('ods_erp_erp_product_spu'))
+  where pg.pt = '20211031' and substring(pg.pt,1,6) = '${month}'
+  group by ps.old_no
+  union all
+  select
+    dsp.product_no
+   ,dsp.avg_purchase_price
+   ,dsp.source
+  from
+  (
+      select
+        dsp.product_no
+       ,dsp.avg_purchase_price
+       ,dsp.source
+       ,row_number() over (partition by substring(dsp.pt,1,6),dsp.product_no order by dsp.pt desc) as rn
+      from
+      (
+          select
+          a.product_no,
+          nvl(a.avg_purchase_price,0) as avg_purchase_price,
+          'opdc' as source,
+          a.pt
+        from opdc.dim_spu_price a
+        where substring(a.pt,1,6) = '${month}' and a.pt>='20211101'
+        union all
+        select
+            a.product_no,
+            nvl(a.avg_purchase_price,0) as avg_purchase_price,
+            'opdc' as source,
+            a.pt
+        from popopiedc.dim_spu_price a
+        where substring(a.pt,1,6) = '${month}' and a.pt>='20211101'
+      ) dsp
+  ) dsp
+  where dsp.rn =1
+) psp
+on (scd.product_no = psp.product_no)
+;
+-- 产品分类
+@pd_category:=
+select
+ a.id,a.parent_id,a.level,a.cn_name,a.en_name
+from opdc.ods_bamboo_bamboo_pd_category a
+;
+
+@category_level:=
+select
+  pc.id,pc.parent_id,2 as level
+from @pd_category pc
+union all
+select
+  pc.id,pc1.parent_id,1 as level
+from @pd_category pc
+left join @pd_category pc1
+on (pc.parent_id = pc1.id)
+union all
+select
+  pc.id,pc.id,3 as level
+from @pd_category pc
+;
+
+--select a.*,row_number() over (partition by a.id order by a.level asc) as real_level from @category_level a where a.id = 49;
+@levels:=
+select
+ t.id,t.category_id,
+ case when real_level = 1 then cn_name end as 1_level_name,
+ case when real_level = 2 then cn_name end as 2_level_name,
+ case when real_level = 3 then cn_name end as 3_level_name
+from
+(
+    select
+      a.id,b.parent_id as category_id,b.cn_name,a.level,
+      row_number() over (partition by a.id order by a.level asc) as real_level
+    from @category_level a
+    inner join @pd_category b
+    on (nvl(a.parent_id,'-999999999999') = b.id)
+--    where a.id = 49
+) t
+;
+@product_category :=
+select
+   t.id
+  ,concat_ws(',',collect_set(t.1_level_name)) as 1_level_name
+  ,concat_ws(',',collect_set(t.2_level_name)) as 2_level_name
+  ,concat_ws(',',collect_set(t.3_level_name)) as 3_level_name
+from @levels t
+group by t.id
+;
+-- 商品部+品线+3级类目+折扣
+@product_style_info:=
+select
+  t.spu_id
+ ,concat_ws(',',collect_set(t.first_product_style)) as first_product_style
+ ,concat_ws(',',collect_set(t.product_style)) as product_style
+from
+(
+    select
+      psav.spu_id
+     ,case when bpa.name = '一级品线' then pav.value end as first_product_style
+     ,case when bpa.name = '风格线' then pav.value end as product_style
+  from opdc.ods_bamboo_bamboo_pd_spu_attribute_value psav
+  inner join opdc.ods_bamboo_bamboo_pd_attribute bpa
+  on (psav.attribute_id =bpa.id and bpa.name in ('一级品线','风格线') and 1=1 and bpa.is_delete = 0)
+  inner join opdc.ods_bamboo_bamboo_pd_attribute_value pav
+  on (psav.attribute_value_id = pav.id and 1=1 and pav.is_delete = 0)
+  where  psav.is_delete = 0
+) t
+group by t.spu_id
+;
+@spu_style_info_pre:=
+select
+   t.product_no
+  ,t.choose_department_name
+  ,t.first_product_style
+  ,t.product_style
+  ,t.product_bu
+  ,t.id
+  ,t.discount_rate
+  ,t.category_id
+  ,t.1_level_name
+  ,t.2_level_name
+  ,t.3_level_name
+  ,row_number() over (partition by t.product_no order by t.system asc) as rn --优先取lms系统的数据
+from
+(
+    select
+       bps.product_no
+      ,bps.choose_department_name
+      ,psi.first_product_style
+      ,psi.product_style
+      ,split(psi.first_product_style,'_')[0] as product_bu
+      ,bps.id
+      ,nvl(scp.discount,100)/100 as discount_rate
+      ,bps.category_id
+      ,pc.1_level_name
+      ,pc.2_level_name
+      ,pc.3_level_name
+      ,'1' as system
+    from opdc.ods_bamboo_bamboo_pd_spu bps
+    left join @product_style_info psi
+    on (bps.id = psi.spu_id)
+    left join opdc.ods_bamboo_pd_spu_sku_clearance_price scp
+    on (bps.id = scp.pd_spu_id and scp.is_delete = 0 and scp.pt= '${date}')
+    left join @product_category pc
+    on (bps.category_id = pc.id)
+    where 1=1 and bps.is_delete = 0
+) t
+;
+--select * from @spu_style_info_pre a where a.product_no = 'SP21102714AO';
+
+@spu_style_info:=
+select
+   t.product_no
+  ,t.choose_department_name
+  ,t.first_product_style
+  ,t.product_style
+  ,t.product_bu
+  ,t.discount_rate
+  ,t.category_id
+  ,t.1_level_name
+  ,t.2_level_name
+  ,t.3_level_name
+from @spu_style_info_pre t
+where t.rn = 1;
+
+
+insert overwrite table dwd_looklook_product_purchase_cost_against partition(mt='${month}')
+select
+    sdr.site_id as erp_site_id
+   ,ds.ops_site_id
+   ,soi.site_name
+   ,soi.business_unit_name
+   ,sdr.order_date  --支付日期
+   ,sdr.order_id
+   ,sdr.order_no
+   ,sdr.order_amt
+   ,sdr.spu_no
+   ,sdr.product_sale_cnt
+   ,sdr.rate
+   ,sdr.lastest_devalue_date
+   ,esi.product_cost
+   ,to_char(esi.choose_date,'yyyymmdd') as choose_date
+   ,esi.choose_user_name
+   ,nvl(ssi.product_bu,'全公司') as product_bu
+   ,ssi.first_product_style
+   ,ssi.product_style
+   ,ssi.discount_rate
+   ,ssi.1_level_name
+   ,ssi.2_level_name
+   ,ssi.3_level_name
+   ,sdr.product_sale_cnt*esi.product_cost*sdr.rate as purchase_cost_against
+   ,'${month}' as data_month
+from @order_info_product_stock_devalue_rate sdr
+left join @erp_spu_info esi
+on (sdr.spu_no = esi.product_no)
+left join @spu_style_info ssi
+on (sdr.spu_no = ssi.product_no)
+left join opdc.dim_site ds
+on (sdr.site_id = ds.site_id)
+left join dwd_com_site_org_info soi
+on (ds.ops_site_id = soi.site_id and soi.pt ='${date}')
+--where sdr.order_date = '20211025'
+;

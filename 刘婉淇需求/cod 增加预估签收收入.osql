@@ -1,0 +1,134 @@
+--name:cod 增加预估签收收入
+--author:order
+--create time:2021-10-12 18:26
+
+@usd2cny:=
+select data_dt,currency_transform_cny from dwd_com_currency_transform where pt = '${date}' and currency_code = 'USD';
+
+@mapping_erp_site_info:=
+select  a.site_name,
+        a.site_id,
+        nvl(a.cod_erp_site_id,a.erp_site_id) as erp_site_id
+from dwd_mapping_erp_site_id a
+where a.pt='${date}'
+union
+select  a.site_name,
+        a.site_id,
+        a.erp_site_id
+from dwd_mapping_erp_site_id a
+where a.pt='${date}';  -- 混合站问题
+@cod_site:=
+select a.site_id as erp_site_id,
+       b.short_name,
+       s.site_id,
+       a.data_month
+from (select distinct a.site_id,to_char(a.pay_time,'yyyymm') as data_month  from ods_erp_erp_order_order a where a.pt = '${date}'  and a.pay_type=10) a
+  join ods_erp_erp_sys_site b on (a.site_id = b.site_id and b.pt=max_pt('ods_erp_erp_sys_site'))
+  left join @mapping_erp_site_info s on s.erp_site_id=a.site_id
+  left join ods_looklook_looklook_tb_site tb1 on (s.site_id = tb1.id and tb1.pt=max_pt('ods_looklook_looklook_tb_site'))
+where tb1.receipt_type <> 'cod'
+union all
+select b.site_id as erp_site_id,
+       b.short_name,
+       s.site_id,
+       '999999' as data_month
+from  ods_erp_erp_sys_site b
+  left join @mapping_erp_site_info s on s.erp_site_id=b.site_id
+  left join ods_looklook_looklook_tb_site tb1 on (s.site_id = tb1.id and tb1.pt=max_pt('ods_looklook_looklook_tb_site'))
+where tb1.receipt_type = 'cod' and b.pt = '${date}';
+
+--预估签收收入
+--name:cod 增加预估签收收入
+--author:order
+--create time:2021-10-12 18:26
+@order_info_detail:=
+select
+  a.site_id,
+  a.id as order_id,
+  a.order_no,
+  a.order_price-a.discount_price as order_price,
+  a.discount_price,
+  a.final_price,
+  a.pay_time,
+  a.add_time,
+  b.express_no,
+  b.delivery_time,
+  c.receipt_time,
+  c.express_no as receipt_express_no,
+  datediff(b.delivery_time,a.pay_time,'mm') as delivery_date_diff,
+  case when b.delivery_time is null then 0
+       when datediff(b.delivery_time,a.pay_time,'mm')<=1 then 1
+       else 0
+  end if_delivery_count,
+  datediff(c.receipt_time,a.pay_time,'mm') as receipt_time_date_diff,
+  case when c.receipt_time is null then 0
+       when datediff(c.receipt_time,a.pay_time,'mm')<=1 then 1
+       else 0
+  end if_receipt_time_count,
+  to_char(a.pay_time,'yyyymm') data_month,
+  a.status,
+  a.erpstatus,
+  a.currency_final_price,
+  a.currency_rate
+from ods_erp_erp_order_order a
+left join ods_erp_erp_logistics_delivery b
+on (a.id  = b.order_id and b.pt = '${date}')
+left join ods_erp_erp_logistics_trace c
+on (b.express_no = c.express_no and c.pt = '${date}')
+where a.pt = '${date}' and a.pay_type = 10 and to_char(a.pay_time,'yyyymm')>='202101' and a.erpstatus<>10;
+
+
+@receipt_rate_month:=
+select
+  a.site_id,
+  a.data_month,
+  sum(a.if_delivery_count) as delivery_package_count,
+  sum(a.if_receipt_time_count) as receipt_package_count
+from @order_info_detail a
+group by a.site_id,a.data_month
+;
+
+
+--站点收入
+@site_gmv:=
+select
+  t.site_id,
+  t.order_date,
+  sum(if(nvl(t.currency_final_price/t.currency_rate,0)=0,t.final_price,t.currency_final_price/t.currency_rate))as site_gmv
+from
+(
+    select
+      a.site_id,
+      to_char(a.pay_time,'yyyymmdd') as order_date,
+      a.order_id,
+      a.order_no,
+      max(a.final_price) as final_price,
+      max(a.currency_final_price) as currency_final_price,
+      max(a.currency_rate) as currency_rate
+    from @order_info_detail a
+    group by a.site_id,a.pay_time,a.order_id,a.order_no
+) t
+group by t.site_id,t.order_date
+;
+
+-- 预估签收收入
+@predict_receipt_gmv:=
+select
+  a.site_id as erp_site_id,
+  a.site_gmv,
+  a.order_date,
+  a.site_gmv*nvl(if(b.delivery_package_count=0,0,b.receipt_package_count/b.delivery_package_count),0) as site_predict_receipt_gmv,
+  b.data_month,
+  b.delivery_package_count,
+  b.receipt_package_count,
+  nvl(s.site_id,99999) as site_id,
+  nvl(s.site_name,'others') as site_name,
+  a.site_gmv*ctc.currency_transform_cny*nvl(if(b.delivery_package_count=0,0,b.receipt_package_count/b.delivery_package_count),0) as site_predict_receipt_gmv_cny
+from @site_gmv a
+left join @receipt_rate_month b
+on (a.site_id = b.site_id and substring(a.order_date,1,6) = b.data_month)
+left join @mapping_erp_site_info s on s.erp_site_id=a.site_id
+left join @usd2cny ctc on (a.order_date=ctc.data_dt)
+;
+
+

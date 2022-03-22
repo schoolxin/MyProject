@@ -1,0 +1,39 @@
+create table tmp_proudct_stock_devalue_infomdl12
+as
+select
+    product_no as "商品SPU",
+  choose_user_name as "选款人",
+  choose_date as "选款日期",
+  product_cost as "采购成本",
+  stock_amt as "库存数量",
+  site_name as "站点",
+  site_id as "站点ID",
+  business_name as "事业部",
+  product_sale_cnt_total as "总销售数量",
+  product_sale_cnt_bu as "事业部销售数量",
+  product_sale_cnt_site as "站点销售数量",
+  product_belong_cnt as "商品绑定的事业部数量",
+  product_belong_site_cnt as "商品绑定的站点数量",
+  current_month_stock_value as "本月存货金额",
+  current_month_stock_devalue as "本月减值金额",
+  weight_rate_bu as "事业部均摊系数",
+  current_month_product_stock_devalue_bu as "本月事业部减值金额",
+  weight_rate_site as "站点均摊系数",
+  current_month_product_stock_devalue_site as "本月站点减值金额",
+  past_month_stock_value as "上月存货金额",
+  past_month_stock_devalue as "上月减值金额",
+  past_month_product_stock_devalue_bu as "上月事业部减值金额",
+  past_month_product_stock_devalue_site as "上月站点减值金额",
+  data_month as "月份"
+from dws_looklook_proudct_stock_devalue_info t
+where t.mt = "202112"
+and t.business_name in ('MDL事业部')
+;
+
+
+create table tmp_proudct_stock_devalue_infomdl12_12
+as
+select *
+from tmp_proudct_stock_devalue_infomdl12 t1
+where substring(t1.选款日期,1,6) = '202112'
+;

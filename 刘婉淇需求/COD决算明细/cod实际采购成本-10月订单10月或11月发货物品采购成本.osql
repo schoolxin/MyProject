@@ -1,0 +1,64 @@
+--name:cod实际采购成本-10月订单10月或11月发货物品采购成本
+--author:order
+--create time:2021-12-02 16:22
+@mapping_erp_site_info:=
+select  a.site_name,
+        a.site_id,
+        nvl(a.cod_erp_site_id,a.erp_site_id) as erp_site_id
+from dwd_mapping_erp_site_id a
+where a.pt='${date}'
+union
+select  a.site_name,
+        a.site_id,
+        a.erp_site_id
+from dwd_mapping_erp_site_id a
+where a.pt='${date}';  -- 混合站问题
+@order_info_detail:=
+select
+  a.site_id,
+  a.id as order_id,
+  a.order_no,
+  a.order_price-a.discount_price as order_price,
+  a.discount_price,
+  a.final_price,
+  a.pay_time,
+  a.add_time,
+  b.express_no,
+  b.delivery_time,
+  datediff(b.delivery_time,a.pay_time,'mm') as delivery_date_diff,
+  case when b.delivery_time is null then 0
+       when datediff(b.delivery_time,a.pay_time,'mm')<=1 then 1
+       else 0
+  end if_delivery_count,
+  to_char(a.pay_time,'yyyymm') data_month,
+  a.status,
+  a.erpstatus,
+  a.currency_final_price,
+  a.currency_rate,
+  nvl(g.cost,0) as purchase_cost_cny
+from ods_erp_erp_order_order a
+left join (
+  select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+  from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+  --and ld.delivery_status = 1
+) b
+on (a.id  = b.order_id and b.pt = '${date}' and b.rn =1)
+left join (select ldd.*,row_number() over (partition by ldd.bill_id order by ldd.create_time desc) as rns from ods_erp_erp_logistics_delivery_detail ldd where ldd.pt = '${date}') dt
+on dt.delivery_id=b.id and dt.rns =1
+left join ods_erp_erp_purchase_goods  g  on g.id=dt.goods_id and g.pt = max_pt('ods_erp_erp_purchase_goods')
+where a.pt = '${date}' and a.pay_type = 10 and to_char(a.pay_time,'yyyymm')='202110' and a.erpstatus<>10;
+
+--drop table tmp_logistics_purchase_detail;
+create table tmp_logistics_purchase_detail
+as
+select
+  s.site_id,
+  s.site_name,
+  a.order_no,
+  a.pay_time,
+  a.add_time,
+  a.delivery_time,
+  a.purchase_cost_cny
+from @order_info_detail a
+left join @mapping_erp_site_info s on s.erp_site_id=a.site_id
+where a.if_delivery_count = 1;

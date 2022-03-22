@@ -1,0 +1,287 @@
+--name:应收版权税站名明细
+--author:dzz
+--create time:2022-01-20 16:28
+-- 先算出spu绑定事业部总的应收版权税，然后再根据站点的历史销售数量进行均摊  均摊到每个站点上去
+@spu_month_copyright_fees_bu_bind:=
+select
+    cfi.data_month
+   ,nvl(cfi.business_name,'全公司') as business_name
+   ,cfi.spu_no as product_no
+   ,sum(cfi.copyright_fees_bu_bind) as copyright_fees_bu_bind -- 绑定事业部应收版权税
+from dwd_looklook_proudct_copyright_fees_info cfi
+where cfi.mt = '${month}' and cfi.data_month = '${month}'
+group by
+  cfi.data_month
+ ,nvl(cfi.business_name,'全公司')
+ ,cfi.spu_no
+;
+--select * from @spu_month_copyright_fees_bu_bind a where a.product_no = 'SP2111010GPS';
+-- 站点历史销售数量
+--- 获取每个月月末的事业部名称
+@site_org_info:=
+select
+     t.site_id
+    ,t.site_type_id
+    ,t.site_name
+    ,t.business_unit_name
+    ,t.business_unit_id
+from
+(
+    select
+        substring(a.pt,1,6) as date_month,
+        a.site_id,
+        a.site_type_id,
+        a.site_name,
+        a.business_unit_name,
+        a.business_unit_id,
+        a.pt,
+        row_number() over (partition by substring(a.pt,1,6),a.site_id order by a.pt desc) as rn
+  from dwd_com_site_org_info a
+  where substring(a.pt,1,6) = '${month}'
+) t
+where t.rn=1
+;
+-- 选款人 与事业部对应关系
+@user_bu_mapping:=
+select a.choose_user_name,a.month,nvl(b.business_unit_name,a.business_name) as business_name,a.business_unit_id
+from static_choose_user_bu_mapping a
+left join (select b.business_unit_name,b.business_unit_id from @site_org_info b group by b.business_unit_name,b.business_unit_id) b
+on (a.business_unit_id =b.business_unit_id)
+where pt = max_pt('static_choose_user_bu_mapping');
+
+@spu_choose_date:=
+select
+     t1.product_no
+    ,to_char(t1.choose_date,'yyyymmdd') as choose_date
+    ,t1.choose_user_name
+    ,to_char(t1.choose_date,'yyyymm') as choose_month
+    ,t1.supply_price
+    ,t1.purchase_guide_max_price
+    ,t1.purchase_guide_min_price
+from
+(
+    select
+      t.product_no,
+      t.choose_date,
+      t.choose_user_name,
+      t.system,
+      t.supply_price,
+      t.purchase_guide_max_price,
+      t.purchase_guide_min_price
+    from
+    (
+        select
+          t.product_no,
+          t.choose_date,
+          row_number() over (partition by t.product_no order by t.levels asc) as rn,
+          t.system,
+          t.supply_price,
+          t.purchase_guide_max_price,
+          t.purchase_guide_min_price,
+          t.choose_user_name
+        from
+        (
+          select
+            a.product_no,
+            a.choose_date as choose_date,
+            if(lower(nvl(a.system,'other'))='lms',1,2) as levels, --优先从lms系统取 取不到再从其他系统取
+            a.system,
+            a.supply_price,
+            a.purchase_guide_max_price,
+            a.purchase_guide_min_price,
+            a.first_choose_user_name as choose_user_name
+          from opdc.dim_spu a
+          union all
+          select
+            a.product_no,
+            a.choose_date as choose_date,
+            if(lower(nvl(a.system,'other'))='lms',1,2) as levels, --优先从lms系统取 取不到再从其他系统取
+            a.system,
+            a.supply_price,
+            a.purchase_guide_max_price,
+            a.purchase_guide_min_price,
+            a.first_choose_user_name as choose_user_name
+          from popopiedc.dim_spu a
+        ) t
+    ) t
+    where t.rn =1
+) t1
+where to_char(t1.choose_date,'yyyymmdd')>='20211001' and to_char(t1.choose_date,'yyyymm')<='${month}'
+;
+
+-- 开款人与事业部 对应表 根据该表 找到spu 对应的站点
+@choose_spu_bu_mapping:=
+select
+   bm.choose_user_name
+  ,bm.business_name
+  ,bm.business_unit_id
+  ,cd.choose_date
+  ,cd.product_no
+  ,cd.supply_price
+  ,cd.purchase_guide_max_price
+  ,cd.purchase_guide_min_price
+  ,count(1) over (partition by cd.product_no) as product_belong_cnt -- spu 归属的事业部数量
+from @user_bu_mapping bm
+inner join @spu_choose_date cd
+on (bm.month = cd.choose_date and bm.choose_user_name = cd.choose_user_name)
+;
+--开款人对应事业部的站点信息
+@choose_site_mapping:=
+select
+    nvl(soi.business_unit_name,sbm.business_name) as business_name
+   ,sbm.business_unit_id
+   ,sbm.product_no
+   ,sbm.choose_user_name
+   ,sbm.choose_date
+   ,soi.site_name
+   ,soi.site_id
+   ,count(distinct soi.site_id) over (partition by sbm.product_no,sbm.business_unit_id) as product_belong_site_cnt -- spu 在事业部绑定的站点数
+from @choose_spu_bu_mapping sbm
+left join @site_org_info soi
+on (sbm.business_unit_id = soi.business_unit_id)
+;
+@site_product_sale_cnt_history:=
+select
+    t.spu_no as product_spu
+   ,t.product_sale_cnt_site
+   ,t.erp_site_id
+   ,ds.ops_site_id
+from
+(
+      select
+        osp.spu_no
+       ,ooa.site_id as erp_site_id
+       ,sum(osp.sales_qty) as product_sale_cnt_site
+    from
+    (
+      select osp.currency_name as currency_code ,osp.order_amt,osp.spu_no,sum(osp.sales_qty) as sales_qty,osp.order_no,osp.order_id as order_id,osp.paytime
+      from opdc.dwd_order_sales_process osp
+      where osp.change_type = '下单' and to_char(osp.paytime,'yyyymmdd')>='20211001' and osp.spu_no is not null and to_char(osp.paytime,'yyyymm') <= '${month}'
+      and osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0)
+      group by osp.currency_name,osp.order_amt,osp.order_id,osp.spu_no,osp.order_no,osp.paytime
+    ) osp
+    inner join (
+        select b.order_id,b.site_id
+          from opdc.dwd_order_order_appendix b
+          where upper(nvl(b.pay_type,'others')) not in ('货到付款','COD')
+          group by b.order_id,b.site_id
+          union all
+          select b.order_id,b.site_id
+          from opdc.dwd_order_order_appendix b
+          where upper(b.pay_type)  in ('货到付款','COD') and b.site_order_status !='处理中' and lower(b.sys_source) = 'oms' -- erp只拉取site_order_status =2的数据
+          group by b.order_id,b.site_id
+          union all
+          select b.order_id,b.site_id
+          from opdc.dwd_order_order_appendix b
+          where upper(b.pay_type)  in ('货到付款','COD') and lower(b.sys_source) = 'erp'
+          group by b.order_id,b.site_id
+    ) ooa
+    on (osp.order_id = ooa.order_id)
+    group by
+       osp.spu_no
+      ,ooa.site_id
+) t
+inner join (select ds.site_id,ds.ops_site_id,row_number() over (partition by ds.site_id order by ds.start_time desc) as rn from opdc.dim_site ds) ds
+on (t.erp_site_id = ds.site_id and rn=1)
+-- 宝宝派
+union all
+select
+    t.spu_no as product_spu
+   ,t.product_sale_cnt_site
+   ,t.erp_site_id
+   ,ds.ops_site_id
+from
+(
+      select
+        osp.spu_no
+       ,ooa.site_id as erp_site_id
+       ,sum(osp.sales_qty) as product_sale_cnt_site
+    from
+    (
+      select osp.currency_name as currency_code ,osp.order_amt,osp.spu_no,sum(osp.sales_qty) as sales_qty,osp.order_no,osp.order_id as order_id,osp.paytime
+      from popopiedc.dwd_order_sales_process osp
+      where osp.change_type = '下单' and to_char(osp.paytime,'yyyymmdd')>='20211001' and osp.spu_no is not null and to_char(osp.paytime,'yyyymm') <= '${month}'
+      and osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+      group by osp.currency_name,osp.order_amt,osp.order_id,osp.spu_no,osp.order_no,osp.paytime
+    ) osp
+    inner join (
+        select b.order_id,b.site_id
+          from popopiedc.dwd_order_order_appendix b
+          where upper(nvl(b.pay_type,'others')) not in ('货到付款','COD')
+          group by b.order_id,b.site_id
+          union all
+          select b.order_id,b.site_id
+          from popopiedc.dwd_order_order_appendix b
+          where upper(b.pay_type)  in ('货到付款','COD') and b.site_order_status !='处理中' and lower(b.sys_source) = 'oms' -- erp只拉取site_order_status =2的数据
+          group by b.order_id,b.site_id
+          union all
+          select b.order_id,b.site_id
+          from popopiedc.dwd_order_order_appendix b
+          where upper(b.pay_type)  in ('货到付款','COD') and lower(b.sys_source) = 'erp'
+          group by b.order_id,b.site_id
+    ) ooa
+    on (osp.order_id = ooa.order_id)
+    group by
+       osp.spu_no
+      ,ooa.site_id
+) t
+inner join (select ds.site_id,ds.ops_site_id,row_number() over (partition by ds.site_id order by ds.start_time desc) as rn from opdc.dim_site ds) ds
+on (t.erp_site_id = ds.site_id and rn=1)
+;
+
+@ops_site_sale_cnt_info:=
+select
+     soi.business_unit_name
+    ,soi.site_id
+    ,soi.site_name
+    ,soi.site_type_id
+    ,sch.product_spu
+    ,sch.product_sale_cnt_site
+    ,soi.business_unit_id
+from @site_product_sale_cnt_history sch
+inner join @site_org_info soi
+on (sch.ops_site_id = soi.site_id)
+;
+@site_sale_weight_pre:=
+select
+    csm.product_no
+   ,nvl(csm.business_name,'全公司') as business_name
+   ,csm.site_id
+   ,csm.site_name
+   ,csm.product_belong_site_cnt
+   ,nvl(sci.product_sale_cnt_site,0) as product_sale_cnt_site
+   ,sum(nvl(sci.product_sale_cnt_site,0)) over (partition by csm.product_no,csm.business_name) as product_sale_cnt_bu --spu在事业部的总销量
+from @choose_site_mapping csm
+left join @ops_site_sale_cnt_info sci
+on (csm.product_no = sci.product_spu and csm.business_name = sci.business_unit_name and csm.site_id = sci.site_id)
+;
+-- 站点均摊系数逻辑
+@site_sale_weight:=
+select
+   swp.business_name
+  ,swp.product_no
+  ,swp.product_belong_site_cnt
+  ,swp.product_sale_cnt_site
+  ,swp.product_sale_cnt_bu
+  ,swp.site_name
+  ,swp.site_id
+  ,case when swp.product_belong_site_cnt = 0 then -999  -- -999表示当前事业没有站点
+        when swp.product_sale_cnt_bu = 0 then 1/product_belong_site_cnt
+        else swp.product_sale_cnt_site/swp.product_sale_cnt_bu
+   end as weight_rate
+from @site_sale_weight_pre swp
+;
+insert overwrite table dwd_looklook_proudct_copyright_fees_info_receivable partition (mt = '${month}')
+select
+  fbb.business_name
+ ,fbb.product_no
+ ,fbb.copyright_fees_bu_bind
+ ,fbb.data_month
+ ,ssw.site_id
+ ,ssw.site_name
+ ,ssw.weight_rate
+ ,if(nvl(ssw.weight_rate,-999) = -999,fbb.copyright_fees_bu_bind,ssw.weight_rate*fbb.copyright_fees_bu_bind) as  copyright_fees_site_bind-- 站点应收税
+from @spu_month_copyright_fees_bu_bind fbb
+left join @site_sale_weight ssw
+on (fbb.business_name = ssw.business_name and fbb.product_no = ssw.product_no)
+;

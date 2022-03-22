@@ -1,0 +1,245 @@
+--name:cod9月订单-10月底签收
+--author:order
+--create time:2021-11-02 19:34
+--1.9月订单截止10月末的实际签收金额；
+--2.9月订单截止10月末实际产生的物流费用；
+--3.9月订单截止10月末的发货采购成本；
+--4.9月订单截止10月末的签收采购成本；
+--5.9月订单实际产生的营销费用；
+@mapping_erp_site_info:=
+select  a.site_name,
+        a.site_id,
+        nvl(a.cod_erp_site_id,a.erp_site_id) as erp_site_id
+from dwd_mapping_erp_site_id a
+where a.pt='${date}'
+union
+select  a.site_name,
+        a.site_id,
+        a.erp_site_id
+from dwd_mapping_erp_site_id a
+where a.pt='${date}';  -- 混合站问题
+
+@usd2cny:=
+select data_dt,currency_transform_cny from dwd_com_currency_transform where pt = '${date}' and currency_code = 'USD';
+-- 签收收入
+@order_receipt_gmv:=
+select
+  order_id,
+  site_id,
+  order_no,
+  pay_month,
+  sum(nvl(gmv_usd,0)*ctc.currency_transform_cny) as receipt_gmv_cny
+from
+(
+    select
+        oo.id as order_id,
+        oo.site_id,
+        oo.order_no,
+        to_char(oo.pay_time,'yyyymm') as pay_month,
+        lp.codcurrency_price/oo.currency_rate as gmv_usd,
+        lt.receipt_time,
+        case when lt.receipt_time is null then 0 when to_char(receipt_time,'yyyymm')<='202110' then 1 else 0 end if_counted_receipt
+    from ods_erp_erp_order_order oo
+    left join(
+    select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+    from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+    ) ld
+    on (oo.id = ld.order_id and ld.rn = 1)
+    left join ods_erp_erp_logistics_package lp
+    on (ld.package_id = lp.id and lp.pt = '${date}')
+    left join ods_erp_erp_logistics_trace lt
+    on (lp.express_no = lt.express_no and lt.pt = '${date}')
+    where oo.pay_type = 10 and oo.pt = '${date}' and to_char(oo.pay_time,'yyyymm') = '202109'
+) t
+left join @usd2cny ctc on (to_char(t.receipt_time,'yyyymmdd')=ctc.data_dt)
+where t.if_counted_receipt = 1
+group by
+  order_id,
+  site_id,
+  order_no,
+  pay_month
+;
+-- 9月订单截止10月末的签收采购成本
+@order_receipt_purchase_cost:=
+select
+  order_id,
+  site_id,
+  order_no,
+  pay_month,
+  sum(purchase_cost_cny) as receipt_purchase_cost_cny
+from
+(
+  select
+     o.id as order_id,
+     o.site_id,
+     o.order_no,
+     to_char(o.pay_time,'yyyymm') as pay_month,
+     nvl(g.cost,0) as purchase_cost_cny,
+     t.receipt_time,
+     case when t.receipt_time is null then 0 when to_char(t.receipt_time,'yyyymm')<='202110' then 1 else 0 end if_counted_receipt
+  from ods_erp_erp_order_order o
+  left join
+  (
+    select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+    from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+  ) d
+  on o.id=d.order_id and d.rn = 1
+  left join (select ldd.*,row_number() over (partition by ldd.bill_id order by ldd.create_time desc) as rns from ods_erp_erp_logistics_delivery_detail ldd where ldd.pt = '${date}') dt
+  on dt.delivery_id=d.id and dt.rns =1
+  left join ods_erp_erp_logistics_trace  t on t.express_no=d.express_no and t.pt = max_pt('ods_erp_erp_logistics_trace')
+  left join ods_erp_erp_purchase_goods  g  on g.id=dt.goods_id and g.pt = max_pt('ods_erp_erp_purchase_goods')
+  where o.pay_type=10 and to_char(o.pay_time,'yyyymm') = '202109' and o.pt = '${date}'
+) t
+where t.if_counted_receipt = 1
+group by
+  order_id,
+  site_id,
+  order_no,
+  pay_month
+
+;
+
+-- 9月订单截止10月末的发货采购成本
+@order_delivery_purchase_cost:=
+select
+  order_id,
+  site_id,
+  order_no,
+  pay_month,
+  sum(purchase_cost_cny) as delivery_purchase_cost_cny
+from
+(
+  select
+     o.id as order_id,
+     o.site_id,
+     o.order_no,
+     to_char(o.pay_time,'yyyymm') as pay_month,
+     nvl(g.cost,0) as purchase_cost_cny,
+     d.delivery_time,
+     case when d.delivery_time is null then 0 when to_char(d.delivery_time,'yyyymm')<='202110' then 1 else 0 end if_counted_delivery
+  from ods_erp_erp_order_order o
+  left join
+  (
+    select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+    from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+  ) d
+  on o.id=d.order_id and d.rn = 1
+  left join (select ldd.*,row_number() over (partition by ldd.bill_id order by ldd.create_time desc) as rns from ods_erp_erp_logistics_delivery_detail ldd where ldd.pt = '${date}') dt
+  on dt.delivery_id=d.id and dt.rns =1
+  left join ods_erp_erp_purchase_goods  g  on g.id=dt.goods_id and g.pt = max_pt('ods_erp_erp_purchase_goods')
+  where o.pay_type=10 and to_char(o.pay_time,'yyyymm') = '202109' and o.pt = '${date}'
+) t
+where t.if_counted_delivery = 1
+group by
+  order_id,
+  site_id,
+  order_no,
+  pay_month
+;
+--2.9月订单截止10月末实际产生的物流费用；
+--尾程成本
+@order_shipment_cost:=
+select
+  order_id,
+  site_id,
+  order_no,
+  pay_month,
+  sum(shipment_cost_cny) as shipment_cost_cny
+from
+(
+    select
+     o.id as order_id,
+     o.site_id,
+     o.order_no,
+     to_char(o.pay_time,'yyyymm') as pay_month,
+     f.logistics_delivery_time,
+     nvl(f.actual_shipping_fee,0)*ctc.currency_transform_cny as shipment_cost_cny,
+     case when f.logistics_delivery_time is null then 0 when to_char(f.logistics_delivery_time,'yyyymm')<='202110' then 1 else 0 end if_counted_delivery
+  from ods_erp_erp_order_order o
+  left join
+  (
+      select distinct t1.express_no,t1.order_id,t1.site_id from ods_erp_erp_logistics_delivery t1 where t1.pt='${date}'
+      union all
+      select distinct a.express_no_new as express_no,b.order_id,b.site_id
+      from erp_express_no_mapping a
+      join ods_erp_erp_logistics_delivery b on (a.express_no_old = b.express_no and b.pt = max_pt('ods_erp_erp_logistics_delivery'))
+  ) d on o.id=d.order_id
+  left join  ods_erp_erp_finance_cod_shipment_back_to_article f on d.express_no=f.express_no and f.pt = '${date}'
+  left join dwd_com_currency_transform ctc on (to_char(f.logistics_delivery_time,'yyyymmdd')=ctc.data_dt and ctc.currency_code = (case when f.cod_currency = 'RMB' then 'CNY' else f.cod_currency end)  and ctc.pt = max_pt('dwd_com_currency_transform'))
+  where  o.pt = '${date}' and o.pay_type=10 and to_char(o.pay_time,'yyyymm') = '202109'
+) t
+where t.if_counted_delivery= 1
+group by
+  order_id,
+  site_id,
+  order_no,
+  pay_month
+;
+-- 头程
+
+@head_cost:=
+select
+  order_id,
+  site_id,
+  order_no,
+  pay_month,
+  sum(frist_fee) as frist_fee_cny
+from
+(
+    select
+     o.id as order_id,
+     o.site_id,
+     o.order_no,
+     ld.frist_time,
+     nvl(frist_fee,0) as frist_fee,
+     to_char(o.pay_time,'yyyymm') as pay_month,
+     case when ld.frist_time is null then 0 when to_char(ld.frist_time,'yyyymm')<='202110' then 1 else 0 end if_counted_first
+  from ods_erp_erp_order_order o
+  left join
+  (
+    select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+    from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+  ) ld
+  on o.id=ld.order_id and ld.rn=1
+  where o.pt = '${date}' and o.pay_type=10 and to_char(o.pay_time,'yyyymm') = '202109'
+) t
+where t.if_counted_first= 1
+group by
+  order_id,
+  site_id,
+  order_no,
+  pay_month
+;
+
+create table tmp_order09_info
+as
+select
+    o.site_id,
+    o.order_no,
+    o.id as order_id,
+    o.pay_time,
+    nvl(org.receipt_gmv_cny,0) as receipt_gmv_cny,
+    nvl(rpc.receipt_purchase_cost_cny,0) as receipt_purchase_cost_cny,
+    nvl(dpc.delivery_purchase_cost_cny,0) as delivery_purchase_cost_cny,
+    nvl(sc.shipment_cost_cny,0) as shipment_cost_cny,
+    nvl(hc.frist_fee_cny,0) as frist_fee_cny,
+    nvl(esi.site_id,0) as ops_site_id,
+    nvl(esi.site_name,'other') as ops_site_name,
+    nvl(soi.business_unit_name,'other') as business_unit_name
+from ods_erp_erp_order_order o
+left join @order_receipt_gmv org
+on (o.site_id = org.site_id and o.id = org.order_id)
+left join @order_receipt_purchase_cost rpc
+on (o.site_id = rpc.site_id and o.id = rpc.order_id)
+left join @order_delivery_purchase_cost dpc
+on (o.site_id = dpc.site_id and o.id = dpc.order_id)
+left join @order_shipment_cost sc
+on (o.site_id = sc.site_id and o.id = sc.order_id)
+left join @head_cost hc
+on (o.site_id = hc.site_id and o.id = hc.order_id)
+left join @mapping_erp_site_info esi
+on (o.site_id = esi.erp_site_id)
+left join dwd_com_site_org_info soi
+on (esi.site_id =soi.site_id and soi.pt = '${date}')
+where o.pt = '${date}' and o.pay_type=10 and to_char(o.pay_time,'yyyymm') = '202109'
+;

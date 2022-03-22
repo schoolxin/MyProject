@@ -1,0 +1,30 @@
+--name:BI
+--author:order
+--create time:2021-10-26 15:51
+select
+*
+from app_looklook_daily_paypal_trans_info a where a.pt = '${date}' and a.site_name = 'other' and a.trans_date between '20210901' and '20210931';
+
+
+select * from ods_looklook_mongodb_paypal_transaction_info a
+where a.paypal_shop_account = 'ipassmcse.orderplus2018@gmail.com'
+and a.pt = '${date}' and to_char(a.transaction_date,'yyyymmdd') between '20210901' and '20210931'
+and a.transaction_event_code in ('T0000','T0006','T0011');
+
+
+
+select * from ods_looklook_mongodb_paypal_transaction_info a where a.pt = '${date}' and a.transaction_event_code = 'T0400';
+
+select
+ t1.transaction_id,t1.paypal_reference_id,t3.site_name,t1.paypal_shop_account,t1.transaction_date,t1.transaction_amount_value
+from ods_looklook_mongodb_paypal_transaction_info t1
+left join (select distinct paypal_reference_id,transaction_id from ods_looklook_mongodb_paypal_transaction_info t2 where 1=1 and t2.pt = '${date}') t2
+on t1.paypal_reference_id=t2.transaction_id
+left join dwd_mapping_txn_order_site t3
+on nvl(t2.paypal_reference_id,nvl(t1.paypal_reference_id,t1.transaction_id))=t3.txn_id and t3.pay_type='paypal' and t3.pt='${date}'
+where t1.pt='${date}' and t1.transaction_event_code ='T0000' and t3.site_name is not null
+;
+
+
+
+select * from app_looklook_daily_shoplazza_site_user_to_edm a where a.site_name = 'aromiya' and a.dt = '${date}';

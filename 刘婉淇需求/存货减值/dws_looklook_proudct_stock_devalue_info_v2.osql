@@ -1,0 +1,34 @@
+--name:dws_looklook_proudct_stock_devalue_info
+--author:order
+--create time:2021-11-26 18:18
+--insert overwrite table dws_looklook_proudct_stock_devalue_info partition (mt = '${date}')
+insert overwrite table dws_looklook_proudct_stock_devalue_info partition (mt = '${month}')
+select
+   a.product_no
+  ,a.choose_user_name
+  ,a.choose_date
+  ,a.product_cost
+  ,a.stock_amt
+  ,a.site_name
+  ,a.site_id
+  ,a.business_name
+  ,a.product_sale_cnt_total --spu在所绑定的事业部中的总销售数量
+  ,a.product_sale_cnt_bu--spu在事业部中的销售数量
+  ,a.product_sale_cnt_site--spu在归属的站点中的销售数量
+  ,a.product_belong_cnt --spu 绑定的事业部数量
+  ,a.product_belong_site_cnt--spu 绑定的站点数量
+  ,a.stock_value as current_month_stock_value --当月存货金额
+  ,a.stock_devalue as current_month_stock_devalue --当月存货减值金额
+  ,a.weight_rate_bu--事业部均摊系数
+  ,a.product_stock_devalue_bu as current_month_product_stock_devalue_bu --事业部减值金额
+  ,a.weight_rate_site--站点均摊系数
+  ,a.product_stock_devalue_site as current_month_product_stock_devalue_site --当月站点存货减值金额
+  ,b.stock_value as past_month_stock_value --上月存货金额
+  ,b.stock_devalue as past_month_stock_devalue --上月存货减值金额
+  ,b.product_stock_devalue_bu as past_month_product_stock_devalue_bu -- 上月事业部减值金额
+  ,b.product_stock_devalue_site as past_month_product_stock_devalue_site --上月站点减值金额
+from dwd_looklook_proudct_stock_devalue_info a
+left join dwd_looklook_proudct_stock_devalue_info b
+on (a.site_id = b.site_id and a.product_no = b.product_no and b.mt = '${past_month}')
+where a.mt = '${month}'
+;

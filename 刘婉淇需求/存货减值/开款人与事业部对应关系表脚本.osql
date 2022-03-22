@@ -1,0 +1,26 @@
+--name:开款人与事业部对应关系表脚本
+--author:order
+--create time:2021-12-03 10:51
+select
+  a.choose_user_name
+ ,a.first_choose_user_name
+from opdc.dim_spu a
+where to_char(a.choose_date,'yyyymm') = '202202'
+union all
+--create time:2021-12-03 10:51
+select
+  distinct
+  a.choose_user_name
+ ,a.first_choose_user_name
+from popopiedc.dim_spu a
+where to_char(a.choose_date,'yyyymm') = '202202'
+;
+
+
+select
+   distinct
+   t.business_unit_id
+  ,t.business_unit_name
+  ,t.pt
+from dwd_com_site_org_info t
+where t.pt <='${date}' and t.pt >='20220201' and t.site_id in ('19357','18372','18371','18369','18213','17929','12436');

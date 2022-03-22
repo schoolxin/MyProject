@@ -1,0 +1,18 @@
+--name:cod签收金额代收手续费_每月所需数据脚本
+--author:order
+--create time:2022-03-18 14:41
+--finance_codbacktoarticle  签收金额取这个表中的ActualCodFee 签收日期取SignTime 币种取CodCurrency
+--finance_codservicechargebacktoarticle 手续费
+-- 账单中的签收收入信息
+-- 澳鹏
+select
+   upper(a.expressno) as expressno
+  ,a.signtime
+  ,nvl(a.actualcodfee,0) as actualcodfee
+  ,a.codcurrency
+from ods_erp_erp_finance_codbacktoarticle_full a
+where a.pt = '${date}' and to_char(a.deliverytime,'yyyymmdd')>='20220201'
+;
+
+
+

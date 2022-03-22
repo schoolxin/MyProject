@@ -1,0 +1,47 @@
+--name:实际签收收入明细表
+--author:order
+--create time:2021-12-02 15:16
+--签收收入明细(按签收日期导数):10月签(签收日期)收收入+11月(签收日期)签收收入 +订单日期
+--订单号  签收日期   收入(RMB)  订单日期
+@usd2cny:=
+select data_dt,currency_transform_cny from dwd_com_currency_transform where pt = '${date}' and currency_code = 'USD';
+
+@mapping_erp_site_info:=
+select  a.site_name,
+        a.site_id,
+        nvl(a.cod_erp_site_id,a.erp_site_id) as erp_site_id
+from dwd_mapping_erp_site_id a
+where a.pt='${date}'
+union
+select  a.site_name,
+        a.site_id,
+        a.erp_site_id
+from dwd_mapping_erp_site_id a
+where a.pt='${date}';  -- 混合站问题
+
+
+--drop table tmp_receipt_data;
+
+create table tmp_receipt_data as
+select
+    nvl(s.site_id,99999) as site_id,
+    nvl(s.site_name,'others') as site_name,
+    to_char(c.receipt_time,'yyyymmdd') receipt_date,
+    nvl(b.codcurrency_price,0) / t.currency_rate as gmv_usd,
+    nvl(b.codcurrency_price,0) / t.currency_rate*ctc.currency_transform_cny as gmv_cny,
+    t.order_no,
+    to_char(t.add_time,'yyyymmdd') as order_date
+from (
+select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+--and ld.delivery_status = 1
+) a
+inner join  ods_erp_erp_logistics_package b on a.package_id=b.id and b.pt = max_pt('ods_erp_erp_logistics_package') and a.rn = 1
+left join  ods_erp_erp_logistics_trace c on a.express_no=c.express_no and c.pt = max_pt('ods_erp_erp_logistics_package')
+left join  ods_erp_erp_order_order t on t.id=a.order_id  and t.pt = max_pt('ods_erp_erp_order_order')
+left join @mapping_erp_site_info s on s.erp_site_id=a.site_id
+left join @usd2cny ctc on (to_char(c.receipt_time,'yyyymmdd')=ctc.data_dt)
+where to_char(c.receipt_time,'yyyymm') in ('202110','202111')
+and 1=1
+and t.pay_type=10
+;

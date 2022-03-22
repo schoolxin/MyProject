@@ -1,0 +1,617 @@
+
+--name:cod新决算逻辑
+--author:OrderPlus
+--create time:2019-10-22 16:47
+@usd2cny:=
+select data_dt,currency_transform_cny from dwd_com_currency_transform where pt = '${date}' and currency_code = 'USD';
+
+@mapping_erp_site_info:=
+select  a.site_name,
+        a.site_id,
+        nvl(a.cod_erp_site_id,a.erp_site_id) as erp_site_id
+from dwd_mapping_erp_site_id a
+where a.pt='${date}'
+union
+select  a.site_name,
+        a.site_id,
+        a.erp_site_id
+from dwd_mapping_erp_site_id a
+where a.pt='${date}';  -- 混合站问题
+@cod_site:=
+select a.site_id as erp_site_id,
+       b.short_name,
+       s.site_id,
+       a.data_month
+from (select distinct a.site_id,to_char(a.pay_time,'yyyymm') as data_month  from ods_erp_erp_order_order a where a.pt = '${date}'  and a.pay_type=10) a
+  join ods_erp_erp_sys_site b on (a.site_id = b.site_id and b.pt=max_pt('ods_erp_erp_sys_site'))
+  left join @mapping_erp_site_info s on s.erp_site_id=a.site_id
+  left join ods_looklook_looklook_tb_site tb1 on (s.site_id = tb1.id and tb1.pt=max_pt('ods_looklook_looklook_tb_site'))
+where tb1.receipt_type <> 'cod'
+union all
+select b.site_id as erp_site_id,
+       b.short_name,
+       s.site_id,
+       '999999' as data_month
+from  ods_erp_erp_sys_site b
+  left join @mapping_erp_site_info s on s.erp_site_id=b.site_id
+  left join ods_looklook_looklook_tb_site tb1 on (s.site_id = tb1.id and tb1.pt=max_pt('ods_looklook_looklook_tb_site'))
+where tb1.receipt_type = 'cod' and b.pt = '${date}';
+--签收订单收入
+@signed_gvm:=
+select
+nvl(s.site_id,99999) as site_id,
+nvl(s.site_name,'others') as site_name,
+to_char(c.receipt_time,'yyyymmdd') data_dt,
+sum(nvl(b.codcurrency_price,0) / t.currency_rate) as gmv_usd,
+sum(nvl(b.codcurrency_price,0) / t.currency_rate*ctc.currency_transform_cny) as gmv_cny,
+sum(
+case when c.status<>3 then 0
+     else
+          case when a.express_id in(81) then
+                  case
+                      when to_char(c.receipt_time,'yyyy-mm-dd')<'2019-03-20' and nvl(b.codcurrency_price,0) * 0.02<=40 and nvl(b.codcurrency_price,0)>0 then 40
+                      when to_char(c.receipt_time,'yyyy-mm-dd')<'2019-03-20' and nvl(b.codcurrency_price,0) * 0.02>40 then nvl(b.codcurrency_price,0) * 0.02
+                      when to_char(c.receipt_time,'yyyy-mm-dd')>='2019-03-20' and nvl(b.codcurrency_price,0) * 0.03<=20 and nvl(b.codcurrency_price,0)>0 then 20
+                      when to_char(c.receipt_time,'yyyy-mm-dd')>='2019-03-20' and nvl(b.codcurrency_price,0) * 0.03>20 then nvl(b.codcurrency_price,0) * 0.03
+                      else 0
+                  end / t.currency_rate
+              -- TKL代收手续费
+              when a.express_id in(86) then
+                  case
+                      when to_char(c.receipt_time,'yyyy-mm-dd')<'2019-03-20' and nvl(b.codcurrency_price,0) * 0.02<=40 and nvl(b.codcurrency_price,0)>0 then 40
+                      when to_char(c.receipt_time,'yyyy-mm-dd')<'2019-03-20' and nvl(b.codcurrency_price,0) * 0.02 >40 and nvl(b.codcurrency_price,0) * 0.02<=10000 then nvl(b.codcurrency_price,0) * 0.02
+                      when to_char(c.receipt_time,'yyyy-mm-dd')<'2019-03-20' and nvl(b.codcurrency_price,0) * 0.02>10000 then 10000
+                      when to_char(c.receipt_time,'yyyy-mm-dd')>='2019-03-20' and nvl(b.codcurrency_price,0) * 0.03<=20 and nvl(b.codcurrency_price,0) >0 then 20
+                      when to_char(c.receipt_time,'yyyy-mm-dd')>='2019-03-20' and nvl(b.codcurrency_price,0) * 0.03>20  then nvl(b.codcurrency_price,0) * 0.03
+                      else 0
+                  end / t.currency_rate
+              when a.express_id in(89) then (nvl(b.codcurrency_price,0) * 0.04) / t.currency_rate
+              when a.express_id in(100) then (nvl(b.codcurrency_price,0) * 0.03) / t.currency_rate
+              -- 闪电达物流商的代收手续费
+              when a.express_id in(291) then (nvl(b.codcurrency_price,0) * 0.02) / t.currency_rate
+              when a.express_id in(69) then
+                  case
+                      when b.codcurrency_price/t.currency_rate<138 and  b.codcurrency_price >0 then 4.5
+                      when b.codcurrency_price/t.currency_rate>=138 and b.codcurrency_price/t.currency_rate<273 then 6.1
+                      when b.codcurrency_price/t.currency_rate>=273 and b.codcurrency_price/t.currency_rate<410 then 9.2
+                      when b.codcurrency_price/t.currency_rate>=410 and b.codcurrency_price/t.currency_rate<1366 then 12
+                      when b.codcurrency_price/t.currency_rate>=1366 then 15
+                  else 0
+              end
+
+              when a.express_id in(70) then
+                  case
+                      when b.codcurrency_price/t.currency_rate<138 and b.codcurrency_price>0 then 5
+                      when b.codcurrency_price/t.currency_rate>=138 and b.codcurrency_price/t.currency_rate<273 then 5.5
+                      when b.codcurrency_price/t.currency_rate>=273 and b.codcurrency_price/t.currency_rate<410 then 6.4
+                      when b.codcurrency_price/t.currency_rate>=410 and b.codcurrency_price/t.currency_rate<1366 then 7.8
+                      when b.codcurrency_price/t.currency_rate>=1366 then 10.7
+                  else 0
+              end
+              when a.express_id in(71,72,73) then
+                  case
+                      when b.codcurrency_price/t.currency_rate<138 and b.codcurrency_price>0 then 3
+                      when b.codcurrency_price/t.currency_rate>=138 and b.codcurrency_price/t.currency_rate<273 then 5
+                      when b.codcurrency_price/t.currency_rate>=273 and b.codcurrency_price/t.currency_rate<410 then 6.4
+                      when b.codcurrency_price/t.currency_rate>=410 and b.codcurrency_price/t.currency_rate<1366 then 7.8
+                      when b.codcurrency_price/t.currency_rate>=1366 then 10.7
+                      else 0
+              end
+          else 0
+      end
+  end
+)*1.07 * max(ctc.currency_transform_cny) as collection_fee_cny
+from (
+select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+--and ld.delivery_status = 1
+) a
+inner join  ods_erp_erp_logistics_package b on a.package_id=b.id and b.pt = max_pt('ods_erp_erp_logistics_package') and a.rn = 1
+left join  ods_erp_erp_logistics_trace c on a.express_no=c.express_no and c.pt = max_pt('ods_erp_erp_logistics_package')
+left join  ods_erp_erp_order_order t on t.id=a.order_id  and t.pt = max_pt('ods_erp_erp_order_order')
+left join @mapping_erp_site_info s on s.erp_site_id=a.site_id
+left join @usd2cny ctc on (to_char(c.receipt_time,'yyyymmdd')=ctc.data_dt)
+where to_char(c.receipt_time,'yyyymmdd')<='${date}'
+and 1=1
+and t.pay_type=10
+group by
+nvl(s.site_id,99999),
+nvl(s.site_name,'others'),
+to_char(c.receipt_time,'yyyymmdd');
+
+
+-- 发货订单金额
+@delivery_gvm:=
+select
+  nvl(s.site_id,99999) as site_id,
+  nvl(s.site_name,'others') as site_name,
+  to_char(a.delivery_time,'yyyymmdd') data_dt,
+  sum(nvl(b.codcurrency_price,0) / t.currency_rate) as gmv_usd,
+  sum(nvl(b.codcurrency_price,0) / t.currency_rate*ctc.currency_transform_cny) as gmv_cny
+from (
+select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+--and ld.delivery_status = 1
+) a
+inner join  ods_erp_erp_logistics_package b on a.package_id=b.id and b.pt = max_pt('ods_erp_erp_logistics_package') and a.rn =1
+left join  ods_erp_erp_logistics_trace c on a.express_no=c.express_no and c.pt = max_pt('ods_erp_erp_logistics_package')
+left join  ods_erp_erp_order_order t on t.id=a.order_id  and t.pt = max_pt('ods_erp_erp_order_order')
+left join @mapping_erp_site_info s on s.erp_site_id=a.site_id
+left join @usd2cny ctc on (to_char(a.delivery_time,'yyyymmdd')=ctc.data_dt)
+where to_char(a.delivery_time,'yyyymmdd')<='${date}'
+and 1=1
+and t.pay_type=10
+group by
+nvl(s.site_id,99999),
+nvl(s.site_name,'others'),
+to_char(a.delivery_time,'yyyymmdd');
+
+--退款
+@refund:=
+select
+  tcr.refund_dt as data_dt,
+  nvl(s.site_id,99999) as site_id,
+  nvl(s.site_name,'others') as site_name,
+  sum(tcr.refund_amount_thb/eoo.currency_rate) as refund_usd,
+  sum(tcr.refund_amount_thb/eoo.currency_rate*ctc.currency_transform_cny) as refund_cny
+from  ods_looklook_looklook_ta_cod_refund tcr
+left join ods_erp_erp_order_order eoo on (tcr.order_no = eoo.order_no and eoo.pt=max_pt('ods_erp_erp_order_order'))
+left join @mapping_erp_site_info s on s.erp_site_id=eoo.site_id
+left join @usd2cny ctc on (tcr.refund_dt=ctc.data_dt)
+where tcr.pt='${date}' and eoo.pay_type='10'
+group by
+tcr.refund_dt,
+nvl(s.site_id,99999),
+nvl(s.site_name,'others');
+-- 签收采购成本
+@signed_purchase_cost:=
+select
+    nvl(s.site_id,99999) as site_id,
+    nvl(s.site_name,'others') as site_name,
+    to_char(t.receipt_time,'yyyymmdd') as data_dt,--数据日期
+    sum(case when oog.sku_id!=oog.originalskuid and oog.originalskuid!=0 then nvl(ogpc.org_sku_cost,0) else g.cost end) as signed_purchase_cost_cny_original, --采购成本CNY
+    sum(g.cost) as signed_purchase_cost_cny --采购成本CNY
+from (
+  select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+  from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+  --and ld.delivery_status = 1
+) d
+left join (select ldd.*,row_number() over (partition by ldd.bill_id order by ldd.create_time desc) as rns from ods_erp_erp_logistics_delivery_detail ldd where ldd.pt = '${date}') dt
+on dt.delivery_id=d.id and dt.rns =1 and d.rn = 1
+left join ods_erp_erp_logistics_trace  t on t.express_no=d.express_no and t.pt = max_pt('ods_erp_erp_logistics_trace')
+left join ods_erp_erp_purchase_goods  g  on g.id=dt.goods_id and g.pt = max_pt('ods_erp_erp_purchase_goods')
+left join ods_erp_erp_order_order    o on o.id=d.order_id and o.pt = max_pt('ods_erp_erp_order_order')
+left join ods_erp_erp_order_order_goods oog on (dt.bill_id = oog.id and d.order_id = oog.order_id and oog.pt = '${date}')
+left join app_looklook_daily_original_goods_purchase_cost ogpc on (oog.id = ogpc.order_goods_id and oog.order_id = ogpc.order_id and ogpc.pt = '${date}')
+left join @mapping_erp_site_info s on s.erp_site_id=d.site_id
+where  t.receipt_time is not null and o.pay_type=10
+and 1=1
+and to_char(t.receipt_time,'yyyymmdd')<='${date}'
+group by
+nvl(s.site_id,99999),
+nvl(s.site_name,'others'),
+to_char(t.receipt_time,'yyyymmdd');
+
+--退货采购成本(签收后退回仓库)
+@returned_purchase_cost:=
+select
+  nvl(s.site_id,99999) as site_id,
+  nvl(s.site_name,'others') as site_name,
+  to_char(d.sign_back_time,'yyyymmdd') as data_dt,--数据日期
+  sum(case when oog.sku_id!=oog.originalskuid and oog.originalskuid!=0 then nvl(ogpc.org_sku_cost,0) else g.cost end) as returned_purchase_cost_cny_original, --采购成本CNY
+  sum( g.cost) as returned_purchase_cost_cny --采购成本CNY
+from (
+  select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+  from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+  --and ld.delivery_status = 1
+) d
+left join (select ldd.*,row_number() over (partition by ldd.bill_id order by ldd.create_time desc) as rns from ods_erp_erp_logistics_delivery_detail ldd where ldd.pt = '${date}') dt
+on dt.delivery_id=d.id and dt.rns = 1 and d.rn = 1
+left join ods_erp_erp_logistics_trace  t on t.express_no=d.express_no and t.pt = max_pt('ods_erp_erp_logistics_trace')
+left join ods_erp_erp_purchase_goods  g  on g.id=dt.goods_id and g.pt = max_pt('ods_erp_erp_purchase_goods')
+left join ods_erp_erp_order_order    o on o.id=d.order_id and o.pt = max_pt('ods_erp_erp_order_order')
+left join ods_erp_erp_order_order_goods oog on (dt.bill_id = oog.id and d.order_id = oog.order_id and oog.pt = '${date}')
+left join app_looklook_daily_original_goods_purchase_cost ogpc on (oog.id = ogpc.order_goods_id and oog.order_id = ogpc.order_id and ogpc.pt = '${date}')
+left join @mapping_erp_site_info s on s.erp_site_id=d.site_id
+where
+o.pay_type=10
+and 1=1
+and to_char(d.sign_back_time,'yyyymmdd')<='${date}' and t.receipt_time is not null and d.sign_back = '1'
+group by
+nvl(s.site_id,99999),
+nvl(s.site_name,'others'),
+to_char(d.sign_back_time,'yyyymmdd');
+--头程成本
+@head_cost:=
+select
+  nvl(s.site_id,99999) as site_id,
+  nvl(s.site_name,'others') as site_name,
+  to_char(a.frist_time,'yyyymmdd') data_dt,
+  sum(nvl(a.frist_fee,0)) as head_cost_cny
+from (
+  select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+  from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+--and ld.delivery_status = 1
+) a
+left join  ods_erp_erp_order_order t on t.id=a.order_id  and t.pt = max_pt('ods_erp_erp_order_order') and a.rn=1
+left join @mapping_erp_site_info s on s.erp_site_id=a.site_id
+where to_char(a.frist_time,'yyyymmdd')<='${date}'
+and 1=1
+and t.pay_type=10
+group by
+nvl(s.site_id,99999),
+nvl(s.site_name,'others'),
+to_char(a.frist_time,'yyyymmdd');
+
+
+
+
+--尾程成本
+@shipment_cost:=
+select
+  nvl(s.site_id,99999) as site_id,
+  nvl(s.site_name,'others') as site_name,
+  to_char(f.logistics_delivery_time,'yyyymmdd') as data_dt,
+  sum(f.actual_shipping_fee*ctc.currency_transform) as shipment_cost_usd,
+  sum(f.actual_shipping_fee*ctc.currency_transform_cny) as shipment_cost_cny
+from ods_erp_erp_finance_cod_shipment_back_to_article f
+left join
+(
+    select distinct t1.express_no,t1.order_id,t1.site_id from ods_erp_erp_logistics_delivery t1 where t1.pt='${date}'
+    union all
+    select distinct a.express_no_new as express_no,b.order_id,b.site_id
+    from erp_express_no_mapping a
+    join ods_erp_erp_logistics_delivery b on (a.express_no_old = b.express_no and b.pt = max_pt('ods_erp_erp_logistics_delivery'))
+) d on d.express_no=f.express_no
+left join  ods_erp_erp_order_order o on o.id=d.order_id and o.pt = max_pt('ods_erp_erp_order_order')
+left join @mapping_erp_site_info s on s.erp_site_id=d.site_id
+left join dwd_com_currency_transform ctc on (to_char(f.logistics_delivery_time,'yyyymmdd')=ctc.data_dt and ctc.currency_code = (case when f.cod_currency = 'RMB' then 'CNY' else f.cod_currency end)  and ctc.pt = max_pt('dwd_com_currency_transform'))
+where  to_char(f.logistics_delivery_time,'yyyymmdd')<='${date}' and f.pt = '${date}' and o.pay_type=10
+group by
+nvl(s.site_id,99999),
+nvl(s.site_name,'others'),
+to_char(f.logistics_delivery_time,'yyyymmdd');
+
+--税金
+@tax_fee_info:=
+select
+*
+from
+(
+    select
+      a.expressno as express_no,
+      a.actualtaxfee,
+      a.systemtaxfee,
+      a.actualcurrency,
+      a.systemcodcurrency,
+      nvl(b.logistics_delivery_time,a.deliverytime) as logistics_delivery_time,
+      a.deliverytime,
+      a.companyname
+  from ods_erp_erp_view_finance_codtaxfeebacktoarticle a
+  left join (
+    select b.express_no,b.logistics_delivery_time, row_number() over (partition by b.express_no  order by b.create_time  desc) as rn
+    from ods_erp_erp_finance_cod_shipment_back_to_article b where b.pt = '${date}'
+  ) b
+  on (a.expressno = b.express_no and b.rn =1)
+  where a.pt = '${date}'
+) t
+;
+
+--税金
+@tax_fees_cost:=
+select
+  nvl(s.site_id,99999) as site_id,
+  nvl(s.site_name,'others') as site_name,
+  to_char(f.logistics_delivery_time,'yyyymmdd') as data_dt,
+  sum(f.actualtaxfee*ctc.currency_transform) as actualtaxfee_usd,
+  sum(f.actualtaxfee*ctc.currency_transform_cny) as actualtaxfee_cny
+from @tax_fee_info f
+left join
+(
+    select distinct t1.express_no,t1.order_id,t1.site_id from ods_erp_erp_logistics_delivery t1 where t1.pt='${date}'
+    union all
+    select distinct a.express_no_new as express_no,b.order_id,b.site_id
+    from erp_express_no_mapping a
+    join ods_erp_erp_logistics_delivery b on (a.express_no_old = b.express_no and b.pt = max_pt('ods_erp_erp_logistics_delivery'))
+) d on d.express_no=f.express_no
+left join  ods_erp_erp_order_order o on o.id=d.order_id and o.pt = max_pt('ods_erp_erp_order_order')
+left join @mapping_erp_site_info s on s.erp_site_id=d.site_id
+left join dwd_com_currency_transform ctc on (to_char(f.logistics_delivery_time,'yyyymmdd')=ctc.data_dt and ctc.currency_code = (case when f.actualcurrency = 'RMB' then 'CNY' else f.actualcurrency end)  and ctc.pt = max_pt('dwd_com_currency_transform'))
+where  to_char(f.logistics_delivery_time,'yyyymmdd')<='${date}' and o.pay_type=10
+group by
+nvl(s.site_id,99999),
+nvl(s.site_name,'others'),
+to_char(f.logistics_delivery_time,'yyyymmdd')
+;
+
+
+--营销成本（营销花费）
+@market_cost :=
+select
+   dmc.data_dt
+  ,dmc.site_id
+  ,dmc.site_name
+  ,sum(dmc.market_cost*cct.currency_transform_cny) as market_cost_cny
+  ,sum(case when  dmc.market_channel='google' then dmc.market_cost*cct.currency_transform_cny end) as google_cost
+  ,sum(case when  dmc.market_channel='fb' then dmc.market_cost*cct.currency_transform_cny end) as facebook_cost
+from app_looklook_daily_market_cost dmc
+  left join dwd_com_currency_transform cct
+    on dmc.currency_code=cct.currency_code and dmc.data_dt=cct.data_dt and cct.pt=max_pt('dwd_com_currency_transform')
+where
+dmc.pt='${date}'
+and exists (select 1 from @cod_site na where na.site_id=dmc.site_id and (na.data_month = substring(dmc.data_dt,1,6) or na.data_month = '999999'))
+and dmc.site_id !='300' -- 这个站特殊 不需要在cod中展示
+group by
+ dmc.data_dt
+,dmc.site_id
+,dmc.site_name
+;
+--无签收订单存货损失
+@unsigned_lost_cost:=
+select
+  d.site_id as erp_site_id,--站点id
+  nvl(s.site_id,99999) as site_id,
+  nvl(s.site_name,'others') as site_name,
+  to_char(d.initial_return_time,'yyyymmdd') as loss_date,
+  g.cost as  loss_cost,
+  d.express_no
+from (
+  select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+  from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+--and ld.delivery_status = 1
+) d
+left join (select ldd.*,row_number() over (partition by ldd.bill_id order by ldd.create_time desc) as rns from ods_erp_erp_logistics_delivery_detail ldd where ldd.pt = '${date}') dt
+on dt.delivery_id=d.id and dt.rns=1 and d.rn=1
+left join ods_erp_erp_purchase_goods  g  on g.id=dt.goods_id and g.pt = max_pt('ods_erp_erp_purchase_goods')
+left join ods_erp_erp_order_order    o on o.id=d.order_id and o.pt = max_pt('ods_erp_erp_order_order')
+left join @mapping_erp_site_info s on s.erp_site_id=d.site_id
+where  datediff(nvl(d.sign_back_time,getdate()),d.initial_return_time) > 20  and o.pay_type=10 and 1=1
+union all
+select
+d.site_id as erp_site_id,--站点id
+nvl(s.site_id,99999) as site_id,
+nvl(s.site_name,'others') as site_name,
+to_char(d.sign_back_time,'yyyymmdd') as loss_date,
+-g.cost as  loss_cost,
+d.express_no
+from (
+  select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+  from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+--and ld.delivery_status = 1
+) d
+left join (select ldd.*,row_number() over (partition by ldd.bill_id order by ldd.create_time desc) as rns from ods_erp_erp_logistics_delivery_detail ldd where ldd.pt = '${date}') dt
+on dt.delivery_id=d.id and dt.rns=1 and d.rn=1
+left join ods_erp_erp_purchase_goods  g  on g.id=dt.goods_id and g.pt = max_pt('ods_erp_erp_purchase_goods')
+left join ods_erp_erp_order_order    o on o.id=d.order_id and o.pt = max_pt('ods_erp_erp_order_order')
+left join @mapping_erp_site_info s on s.erp_site_id=d.site_id
+where  datediff(nvl(d.sign_back_time,getdate()),d.initial_return_time) > 20 and d.sign_back_time is not null  and o.pay_type=10 and 1=1
+;
+@unsigned_loss_cost_f:=
+select
+  ulc.site_id,
+  ulc.site_name,
+  ulc.loss_date,
+  sum(ulc.loss_cost) as loss_cost
+from @unsigned_lost_cost ulc
+where ulc.express_no not in (
+  select express_no_old
+  from erp_express_no_mapping
+  group by express_no_old
+  having  count(1)%2>0
+)
+group by
+ulc.site_id,
+ulc.site_name,
+ulc.loss_date;
+
+--签收订单存货损失
+@signed_loss_cost:=
+select
+    d.site_id as erp_site_id,--站点id
+    nvl(s.site_id,99999) as site_id,
+    nvl(s.site_name,'others') as site_name,
+    a.refund_dt as loss_date,
+    g.cost  as loss_cost
+from
+(
+    select trans_array(2,',',a.refund_dt,a.order_no,a.tracking_no) as (refund_dt,order_no,tracking_no)
+    from ods_looklook_looklook_ta_cod_refund a
+    where a.pt = '${date}'
+) a
+left join (
+  select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+  from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+  --and ld.delivery_status = 1
+) d
+on (a.tracking_no=d.express_no and d.rn = 1)
+left join (select ldd.*,row_number() over (partition by ldd.bill_id order by ldd.create_time desc) as rns from ods_erp_erp_logistics_delivery_detail ldd where ldd.pt = '${date}') dt
+on dt.delivery_id=d.id and dt.rns =1
+left join ods_erp_erp_purchase_goods  g
+on g.id=dt.goods_id and g.pt = max_pt('ods_erp_erp_purchase_goods')
+left join ods_erp_erp_order_order    o
+on o.id=d.order_id and o.pt = max_pt('ods_erp_erp_order_order')
+left join @mapping_erp_site_info s
+on s.erp_site_id=d.site_id
+where  datediff(nvl(d.sign_back_time,getdate()),to_date(a.refund_dt,'yyyymmdd')) > 20 and o.pay_type=10
+union all
+select
+    d.site_id as erp_site_id,--站点id
+    nvl(s.site_id,99999) as site_id,
+    nvl(s.site_name,'others') as site_name,
+    to_char(d.sign_back_time,'yyyymmdd') as loss_date,
+    -g.cost as  loss_cost
+from
+(
+    select trans_array(2,',',a.refund_dt,a.order_no,a.tracking_no) as (refund_dt,order_no,tracking_no)
+    from ods_looklook_looklook_ta_cod_refund a
+    where a.pt = '${date}'
+)  a
+left join (
+  select ld.*,row_number() over (partition by ld.express_no order by ld.create_time desc) as rn
+  from ods_erp_erp_logistics_delivery ld where ld.pt= '${date}'
+  --and ld.delivery_status = 1
+) d
+on (a.tracking_no=d.express_no and d.rn = 1)
+left join (select ldd.*,row_number() over (partition by ldd.bill_id order by ldd.create_time desc) as rns from ods_erp_erp_logistics_delivery_detail ldd where ldd.pt = '${date}') dt
+on dt.delivery_id=d.id and dt.rns =1
+left join ods_erp_erp_purchase_goods  g
+on g.id=dt.goods_id and g.pt = max_pt('ods_erp_erp_purchase_goods')
+left join ods_erp_erp_order_order    o
+on o.id=d.order_id and o.pt = max_pt('ods_erp_erp_order_order')
+left join @mapping_erp_site_info s
+on s.erp_site_id=d.site_id
+where  datediff(nvl(d.sign_back_time,getdate()),to_date(a.refund_dt,'yyyymmdd')) > 20 and d.sign_back_time is not null  and o.pay_type=10
+;
+@signed_loss_cost_f:=
+select
+  slc.site_id,
+  slc.site_name,
+  slc.loss_date,
+  sum(slc.loss_cost) as loss_cost
+from @signed_loss_cost slc
+group by
+slc.site_id,
+slc.site_name,
+slc.loss_date;
+
+@cod_fincial:=
+  select
+  distinct
+  coalesce(t1.data_dt,t2.data_dt,t3.data_dt,t4.data_dt,t5.data_dt,t6.data_dt,t7.data_dt,t8.data_dt,t9.loss_date,t10.loss_date,t11.data_dt) as data_dt,
+  coalesce(t1.site_id,t2.site_id,t3.site_id,t4.site_id,t5.site_id,t6.site_id,t7.site_id,t8.site_id,t9.site_id,t10.site_id,t11.site_id) as site_id,
+  coalesce(t1.site_name,t2.site_name,t3.site_name,t4.site_name,t5.site_name,t6.site_name,t7.site_name,t8.site_name,t9.site_name,t10.site_name,t11.site_name) as site_name,
+  'site' as obj_type,
+  nvl(t1.gmv_cny,0) as gmv_cny, --收入
+  nvl(t1.collection_fee_cny,0) as collection_fee_cny, -- 代收手续费
+  nvl(t2.gmv_cny,0) as delivery_gvm_cny, --发货收入
+  nvl(t3.refund_cny,0) as refund_cny,--退款
+  nvl(t4.signed_purchase_cost_cny,0) as signed_purchase_cost_cny,--签收采购成本 替代后
+  nvl(t5.returned_purchase_cost_cny,0) as returned_purchase_cost_cny, --退货采购成本 替代后
+  nvl(t6.head_cost_cny,0) as head_cost_cny, -- 头程成本
+  nvl(t7.shipment_cost_cny,0) as shipment_cost_cny,-- 尾程成本
+  nvl(t8.market_cost_cny,0) as market_cost_cny,-- 营销花费
+  nvl(t9.loss_cost,0) as unsigned_loss_cost,-- 无签收订单存货损失
+  nvl(t10.loss_cost,0) as signed_loss_cost, -- 签收退回未上架的损失
+  nvl(t4.signed_purchase_cost_cny_original,0) as signed_purchase_cost_cny_original, --签收采购成本 替代前
+  nvl(t5.returned_purchase_cost_cny_original,0) as returned_purchase_cost_cny_original, --退货采购成本 替代前
+  nvl(t11.actualtaxfee_cny,0) as actualtaxfee_cny -- 税金
+from @signed_gvm t1
+full join @delivery_gvm t2 on (t1.site_id=t2.site_id and t1.data_dt = t2.data_dt)
+full join @refund t3 on coalesce(t1.site_id,t2.site_id) = t3.site_id and coalesce(t1.data_dt,t2.data_dt) = t3.data_dt
+full join @signed_purchase_cost t4 on coalesce(t1.site_id,t2.site_id,t3.site_id) = t4.site_id and coalesce(t1.data_dt,t2.data_dt,t3.data_dt) = t4.data_dt
+full join @returned_purchase_cost t5 on coalesce(t1.site_id,t2.site_id,t3.site_id,t4.site_id) = t5.site_id and coalesce(t1.data_dt,t2.data_dt,t3.data_dt,t4.data_dt) = t5.data_dt
+full join @head_cost t6 on coalesce(t1.site_id,t2.site_id,t3.site_id,t4.site_id,t5.site_id) = t6.site_id and coalesce(t1.data_dt,t2.data_dt,t3.data_dt,t4.data_dt,t5.data_dt) = t6.data_dt
+full join @shipment_cost t7 on coalesce(t1.site_id,t2.site_id,t3.site_id,t4.site_id,t5.site_id,t6.site_id)=t7.site_id and coalesce(t1.data_dt,t2.data_dt,t3.data_dt,t4.data_dt,t5.data_dt,t6.data_dt) = t7.data_dt
+full join @market_cost t8 on coalesce(t1.site_id,t2.site_id,t3.site_id,t4.site_id,t5.site_id,t6.site_id,t7.site_id)=t8.site_id and coalesce(t1.data_dt,t2.data_dt,t3.data_dt,t4.data_dt,t5.data_dt,t6.data_dt,t7.data_dt)=t8.data_dt
+full join @unsigned_loss_cost_f t9 on coalesce(t1.site_id,t2.site_id,t3.site_id,t4.site_id,t5.site_id,t6.site_id,t7.site_id,t8.site_id)=t9.site_id and coalesce(t1.data_dt,t2.data_dt,t3.data_dt,t4.data_dt,t5.data_dt,t6.data_dt,t7.data_dt,t8.data_dt)=t9.loss_date
+full join @signed_loss_cost_f t10 on coalesce(t1.site_id,t2.site_id,t3.site_id,t4.site_id,t5.site_id,t6.site_id,t7.site_id,t8.site_id,t9.site_id)=t10.site_id and coalesce(t1.data_dt,t2.data_dt,t3.data_dt,t4.data_dt,t5.data_dt,t6.data_dt,t7.data_dt,t8.data_dt,t9.loss_date)=t10.loss_date
+full join @tax_fees_cost t11 on coalesce(t1.site_id,t2.site_id,t3.site_id,t4.site_id,t5.site_id,t6.site_id,t7.site_id,t8.site_id,t9.site_id,t10.site_id)=t11.site_id and coalesce(t1.data_dt,t2.data_dt,t3.data_dt,t4.data_dt,t5.data_dt,t6.data_dt,t7.data_dt,t8.data_dt,t9.loss_date,t10.loss_date)=t11.data_dt
+where coalesce(t1.site_id,t2.site_id,t3.site_id,t4.site_id,t5.site_id,t6.site_id,t7.site_id,t8.site_id,t9.site_id,t10.site_id,t11.site_id)  is not null
+and coalesce(t1.site_id,t2.site_id,t3.site_id,t4.site_id,t5.site_id,t6.site_id,t7.site_id,t8.site_id,t9.site_id,t10.site_id,t11.site_id) not in ('4309','2444')
+;
+insert overwrite table app_looklook_st_financial_summary_cod partition (pt='${date}')
+select
+    data_dt,
+    cf.site_id as obj_id,
+    cf.site_name as obj_name,
+    cf.obj_type as  obj_type,
+    gmv_cny,
+    collection_fee_cny,
+    delivery_gvm_cny,
+    refund_cny,
+    signed_purchase_cost_cny,
+    returned_purchase_cost_cny,
+    head_cost_cny,
+    shipment_cost_cny,
+    market_cost_cny,
+    unsigned_loss_cost,
+    signed_loss_cost,
+    cf.signed_purchase_cost_cny_original,
+    cf.returned_purchase_cost_cny_original,
+    cf.actualtaxfee_cny
+from @cod_fincial cf
+union all
+select
+    data_dt,
+    to_char(coi.group_id) as obj_id,
+    coi.group_name as obj_name,
+    'group' as obj_type,
+    sum(gmv_cny) as gmv_cny,
+    sum(collection_fee_cny) as collection_fee_cny,
+    sum(delivery_gvm_cny) as delivery_gvm_cny,
+    sum(refund_cny) as refund_cny,
+    sum(signed_purchase_cost_cny) as signed_purchase_cost_cny,
+    sum(returned_purchase_cost_cny) as returned_purchase_cost_cny,
+    sum(head_cost_cny) as head_cost_cny,
+    sum(shipment_cost_cny) as shipment_cost_cny,
+    sum(market_cost_cny) as market_cost_cny,
+    sum(unsigned_loss_cost) as unsigned_loss_cost,
+    sum(signed_loss_cost) as signed_loss_cost,
+    sum(signed_purchase_cost_cny_original) as signed_purchase_cost_cny_original,
+    sum(returned_purchase_cost_cny_original) as returned_purchase_cost_cny_original,
+    sum(cf.actualtaxfee_cny) as actualtaxfee_cny
+from @cod_fincial cf
+join dwd_com_site_org_info coi
+on cf.site_id=coi.site_id and coi.pt=max_pt('dwd_com_site_org_info')
+where coi.business_unit_id is not null
+group by
+ cf.data_dt
+,coi.group_id
+,coi.group_name
+union all
+select
+    data_dt,
+    to_char(coi.project_id) as obj_id,
+    coi.project_name as obj_name,
+    'project' as obj_type,
+    sum(gmv_cny) as gmv_cny,
+    sum(collection_fee_cny) as collection_fee_cny,
+    sum(delivery_gvm_cny) as delivery_gvm_cny,
+    sum(refund_cny) as refund_cny,
+    sum(signed_purchase_cost_cny) as signed_purchase_cost_cny,
+    sum(returned_purchase_cost_cny) as returned_purchase_cost_cny,
+    sum(head_cost_cny) as head_cost_cny,
+    sum(shipment_cost_cny) as shipment_cost_cny,
+    sum(market_cost_cny) as market_cost_cny,
+    sum(unsigned_loss_cost) as unsigned_loss_cost,
+    sum(signed_loss_cost) as signed_loss_cost,
+    sum(signed_purchase_cost_cny_original) as signed_purchase_cost_cny_original,
+    sum(returned_purchase_cost_cny_original) as returned_purchase_cost_cny_original,
+    sum(cf.actualtaxfee_cny) as actualtaxfee_cny
+from @cod_fincial cf
+join dwd_com_site_org_info coi
+on cf.site_id=coi.site_id and coi.pt=max_pt('dwd_com_site_org_info')
+where coi.business_unit_id is not null
+group by
+ cf.data_dt
+,coi.project_id
+,coi.project_name
+union all
+select
+    data_dt,
+    to_char(coi.business_unit_id) as obj_id,
+    coi.business_unit_name as obj_name,
+    'business_unit' as obj_type,
+    sum(gmv_cny) as gmv_cny,
+    sum(collection_fee_cny) as collection_fee_cny,
+    sum(delivery_gvm_cny) as delivery_gvm_cny,
+    sum(refund_cny) as refund_cny,
+    sum(signed_purchase_cost_cny) as signed_purchase_cost_cny,
+    sum(returned_purchase_cost_cny) as returned_purchase_cost_cny,
+    sum(head_cost_cny) as head_cost_cny,
+    sum(shipment_cost_cny) as shipment_cost_cny,
+    sum(market_cost_cny) as market_cost_cny,
+    sum(unsigned_loss_cost) as unsigned_loss_cost,
+    sum(signed_loss_cost) as signed_loss_cost,
+    sum(signed_purchase_cost_cny_original) as signed_purchase_cost_cny_original,
+    sum(returned_purchase_cost_cny_original) as returned_purchase_cost_cny_original,
+    sum(cf.actualtaxfee_cny) as actualtaxfee_cny
+from @cod_fincial cf
+join dwd_com_site_org_info coi
+on cf.site_id=coi.site_id and coi.pt=max_pt('dwd_com_site_org_info')
+where coi.business_unit_id is not null
+group by
+ cf.data_dt
+,coi.business_unit_id
+,coi.business_unit_name;
+;

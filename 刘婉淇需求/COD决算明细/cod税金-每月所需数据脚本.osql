@@ -1,0 +1,188 @@
+--name:cod税金-每月所需数据脚本
+--author:order
+--create time:2022-03-18 10:22
+@mapping_erp_site_info:=
+select
+    t2.site_id,
+    t2.site_name,
+    t2.erp_site_id
+from
+(
+    select
+    t1.site_name,
+    t1.site_id,
+    t1.erp_site_id,
+    t1.status,
+    row_number() over (partition by t1.erp_site_id order by t1.status asc) as rn
+    from
+    (
+        select
+            a.site_name,
+            a.site_id,
+            case when b.site_type_id = 4 then a.cod_erp_site_id else a.erp_site_id end as erp_site_id,
+            b.status
+        from dwd_mapping_erp_site_id a
+        join ods_looklook_looklook_tb_site b
+        on (a.site_id = b.id and b.pt=max_pt('ods_looklook_looklook_tb_site'))
+        where a.pt=max_pt('dwd_mapping_erp_site_id')
+    ) t1
+) t2
+where t2.rn =1
+;
+@order_info_oms:=
+select
+    osp.order_id,osp.order_no,osp.erp_order_id,osp.paytime,ooa.site_id
+from opdc.dwd_order_sales_process osp
+inner join (select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id) ooa
+on (osp.order_id = ooa.order_id)
+where 1=1 and lower(osp.pay_type) in ('货到付款','cod')
+group by osp.order_id,osp.order_no,osp.erp_order_id,osp.paytime,ooa.site_id
+union all
+select
+    osp.order_id,osp.order_no,osp.erp_order_id,osp.paytime,ooa.site_id
+from popopiedc.dwd_order_sales_process osp
+inner join (select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id) ooa
+on (osp.order_id = ooa.order_id)
+where 1=1 and lower(osp.pay_type) in ('货到付款','cod')
+group by osp.order_id,osp.order_no,osp.erp_order_id,osp.paytime,ooa.site_id
+;
+@site_delivery_info_oms:=
+select
+   lps.order_id
+  ,lps.siteid
+  ,upper(lps.expressno) as expressno
+  ,lps.express_name
+from opdc.dw_logistics_package_shipments lps
+where 1=1
+and lps.deliverystatus != '清关退回'
+and lps.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) -- 剔除掉网红手工订单
+group by
+   lps.order_id
+  ,lps.siteid
+  ,upper(lps.expressno)
+  ,lps.express_name
+union all
+select
+   lps.order_id
+  ,lps.siteid
+  ,upper(lps.expressno) as expressno
+  ,lps.express_name
+from popopiedc.dw_logistics_package_shipments lps
+where 1=1
+and lps.deliverystatus != '清关退回'
+--and to_char(lps.deliverytime,'yyyymm')>='20211201'
+and lps.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1) -- 剔除网红订单
+group by
+   lps.order_id
+  ,lps.siteid
+  ,lps.expressno
+  ,lps.express_name
+;
+
+@order_delivery_info:=
+select
+  oio.order_no
+ ,oio.paytime
+ ,oio.site_id as erp_site_id
+ ,dio.expressno
+ ,dio.express_name
+ ,nvl(esi.site_id,0) as ops_site_id
+ ,nvl(esi.site_name,'other') as ops_site_name
+from @order_info_oms oio
+inner join @site_delivery_info_oms dio
+on (nvl(oio.order_id,oio.erp_order_id) = dio.order_id and oio.site_id = dio.siteid)
+left join @mapping_erp_site_info esi
+on (oio.site_id = esi.erp_site_id)
+;
+
+
+
+
+@tax_fee_info_pre:=
+select
+    bta.deliverytime
+   ,upper(bta.expressno) as expressno
+   ,bta.actualtaxfee
+   ,case when bta.actualcurrency = 'RMB' then 'CNY' else bta.actualcurrency end as actualcurrency
+from
+(
+  select
+      bta.deliverytime
+     ,bta.expressno
+     ,bta.actualtaxfee
+     ,bta.actualcurrency
+     ,row_number() over (partition by bta.expressno order by bta.levels asc) as rn
+  from
+  (
+    select
+      nvl(b.logistics_delivery_time,bta.deliverytime) as deliverytime
+     ,bta.expressno
+     ,sum(bta.actualtaxfee) as actualtaxfee
+     ,1 as levels
+     ,bta.actualcurrency
+    from ods_erp_erp_view_finance_codtaxfeebacktoarticle_full bta
+    left join
+    (
+      select b.express_no,b.logistics_delivery_time, row_number() over (partition by b.express_no  order by b.create_time  desc) as rn
+      from ods_erp_erp_finance_cod_shipment_back_to_article_full b where b.pt = '${date}'
+    ) b
+    on (upper(bta.expressno) = upper(b.express_no) and b.rn =1)
+    where bta.pt = '${date}' and to_char(bta.deliverytime,'yyyymmdd')>='20211001'
+    group by
+      nvl(b.logistics_delivery_time,bta.deliverytime)
+     ,bta.expressno
+     ,bta.actualcurrency
+    union all
+    select
+      nvl(b.logistics_delivery_time,bta.deliverytime) as deliverytime
+     ,bta.expressno
+     ,sum(bta.actualtaxfee) as actualtaxfee
+     ,2 as levels
+     ,bta.actualcurrency
+    from ods_erp_erp_popopie_view_finance_codtaxfeebacktoarticle_full bta
+    left join
+    (
+      select b.express_no,b.logistics_delivery_time, row_number() over (partition by b.express_no  order by b.create_time  desc) as rn
+      from ods_erp_erp_popopie_finance_cod_shipment_back_to_article_full b where b.pt = '${date}'
+    ) b
+    on (upper(bta.expressno) = upper(b.express_no) and b.rn =1)
+    where bta.pt = '${date}' and to_char(bta.deliverytime,'yyyymmdd')>='20211201'
+    group by
+      nvl(b.logistics_delivery_time,bta.deliverytime)
+     ,bta.expressno
+     ,bta.actualcurrency
+  ) bta
+) bta
+where bta.rn = 1
+;
+@tax_fees_cost:=
+select
+    to_char(cp.deliverytime,'yyyymmdd') as data_dt
+   ,cp.actualtaxfee*cct.currency_transform as actualtaxfee_usd
+   ,cp.actualtaxfee*cct.currency_transform_cny as actualtaxfee_cny
+   ,cp.actualtaxfee
+   ,cp.actualcurrency as currency_code
+   ,cp.expressno
+from @tax_fee_info_pre cp
+left join dwd_com_currency_transform cct
+on to_char(cp.deliverytime,'yyyymmdd')= cct.data_dt and upper(cp.actualcurrency) = cct.currency_code and cct.pt = max_pt('dwd_com_currency_transform')
+;
+
+
+select
+  fc.data_dt
+ ,fc.expressno
+ ,fc.actualtaxfee
+ ,fc.currency_code
+ ,fc.actualtaxfee_usd
+ ,fc.actualtaxfee_cny
+ ,di.erp_site_id
+ ,di.ops_site_id
+ ,di.ops_site_name
+ ,di.order_no
+ ,di.express_name
+from @tax_fees_cost fc
+left join @order_delivery_info di
+on (upper(fc.expressno) = upper(di.expressno))
+where fc.data_dt between '20220101' and '20220131'
+;

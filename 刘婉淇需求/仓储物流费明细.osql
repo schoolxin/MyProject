@@ -1,0 +1,31 @@
+--name:仓储物流费明细
+--author:order
+--create time:2022-01-27 15:10
+
+create table temp_proudct_stock_fees_info as
+select
+  a.data_dt,a.product_no,a.stock_amt,a.product_stock_fees,a.product_stock_fees_bu,a.product_belong_cnt,a.weight_rate_bu,sum(a.product_stock_fees_bu_site) as product_stock_fees_site
+from dwd_looklook_proudct_stock_fees_info a
+where a.mt= '202112' and a.business_name ='探索者事业部' and a.product_stock_fees>0
+group by a.data_dt,a.product_no,a.stock_amt,a.product_stock_fees,a.product_stock_fees_bu,a.product_belong_cnt,a.weight_rate_bu
+;
+
+select * from dwd_looklook_proudct_stock_devalue_info vv where vv.product_no = 'SP211105B9O3' and vv.mt = '202112';
+
+
+select * from opdc.stock_rate t where t.pt<='${date}' and t.product = 'SP211105B9O3';
+
+select * from opdc.dim_spu c where c.product_no = 'SP211105AHN8';
+select * from opdc.dim_sku c where c.pms_sku_id = '28190771';
+
+select * from opdc.dw_erp_stock_goods_history t where t.pt<='${date}' and t.product_no = 'SP211105B9O3';
+
+
+
+select * from opdc.dwd_order_sales_process v where v.order_no in ('ORD-026917750','ORD-026937202','ORD-027150866');
+
+select * from opdc.dw_logistics_sku_inventory t where t.order_id in (26917750,26937202,27150866);
+
+
+
+select * from opdc.dw_logistics_package_shipments tt where tt.skuid ='70072941';

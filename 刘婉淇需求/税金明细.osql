@@ -1,0 +1,70 @@
+--name:税金明细
+--author:order
+--create time:2021-10-11 19:12
+@mapping_erp_site_info:=
+select  a.site_name,
+        a.site_id,
+        nvl(a.cod_erp_site_id,a.erp_site_id) as erp_site_id
+from dwd_mapping_erp_site_id a
+where a.pt='${date}'
+union
+select  a.site_name,
+        a.site_id,
+        a.erp_site_id
+from dwd_mapping_erp_site_id a
+where a.pt='${date}';  -- 混合站问题
+--税金
+@tax_fee_info:=
+select
+*
+from
+(
+    select
+      a.expressno as express_no,
+      a.actualtaxfee,
+      a.systemtaxfee,
+      a.actualcurrency,
+      a.systemcodcurrency,
+      nvl(b.logistics_delivery_time,a.deliverytime) as logistics_delivery_time,
+      a.deliverytime,
+      a.companyname
+  from ods_erp_erp_view_finance_codtaxfeebacktoarticle a
+  left join (
+    select b.express_no,b.logistics_delivery_time, row_number() over (partition by b.express_no  order by b.create_time  desc) as rn
+    from ods_erp_erp_finance_cod_shipment_back_to_article b where b.pt = '${date}'
+  ) b
+  on (a.expressno = b.express_no and b.rn =1)
+  where a.pt = '${date}'
+) t
+;
+
+--税金
+--@tax_fees_cost:=
+select
+  nvl(s.site_id,99999) as site_id,
+  nvl(s.site_name,'others') as site_name,
+  to_char(f.logistics_delivery_time,'yyyymmdd') as data_dt,
+  sum(f.actualtaxfee*ctc.currency_transform) as actualtaxfee_usd,
+  sum(f.actualtaxfee*ctc.currency_transform_cny) as actualtaxfee_cny,
+  sum(f.actualtaxfee) as actualtaxfee,
+  f.express_no
+from @tax_fee_info f
+left join
+(
+    select distinct t1.express_no,t1.order_id,t1.site_id from ods_erp_erp_logistics_delivery t1 where t1.pt='${date}'
+    union all
+    select distinct a.express_no_new as express_no,b.order_id,b.site_id
+    from erp_express_no_mapping a
+    join ods_erp_erp_logistics_delivery b on (a.express_no_old = b.express_no and b.pt = max_pt('ods_erp_erp_logistics_delivery'))
+) d on d.express_no=f.express_no
+left join  ods_erp_erp_order_order o on o.id=d.order_id and o.pt = max_pt('ods_erp_erp_order_order')
+left join @mapping_erp_site_info s on s.erp_site_id=d.site_id
+left join dwd_com_currency_transform ctc on (to_char(f.logistics_delivery_time,'yyyymmdd')=ctc.data_dt and ctc.currency_code = (case when f.actualcurrency = 'RMB' then 'CNY' else f.actualcurrency end)  and ctc.pt = max_pt('dwd_com_currency_transform'))
+where  to_char(f.logistics_delivery_time,'yyyymm')='202109' and o.pay_type=10
+group by
+nvl(s.site_id,99999),
+nvl(s.site_name,'others'),
+to_char(f.logistics_delivery_time,'yyyymmdd'),
+f.express_no
+;
+--6081121804316

@@ -1,0 +1,484 @@
+--name:减值金额
+--author:order
+--create time:2021-09-16 15:27
+--LMS系统的个商品已经绑定了商品部及对应的品线。各个产品的存货减值逻辑杨义光确认后，会给到LMS系统的人员维护对应产品的减值逻辑，
+--LMS中的产品页面后续会显示出对应的折扣出来（目前是任志洋给到折扣标准给到马哥，马哥那边手动维护到LMS中，后续会实现自动计算折扣逻辑）。
+--需求：在BI中新增一个报表，月度计算数据，字段：商品部，品线，商品1至3及类目，事业部，站点名，站点ID，SKU，数量，存货金额，
+--存货减值金额（各站点减值金额按商品部计算好后，根据个商品部绑定的事业部的收入均摊对应的存货减值金额）。金额计算参考BI清仓决算报表中的采购成本逻辑计算.
+--ods_erp_stock_goods  库存表  --ods_erp_stock_goodsin 入库表 --ods_erp_stock_goodsout 出库表  截止这个时点，在库的库存数
+-- LMS没有算好，只是有个折扣在，你需要取系统的成本*折扣，计算减值金额
+-- 我的意思是，取ERP的时点库存数量，然后匹配单位成本，数量* 单位成本=总存货金额
+--select * from op_jxl.ods_erp_stock_goodsout t where t.goodsid = '3267212';
+
+--select * from op_jxl.ods_erp_stock_goods a where a.goodsid = '3267212';
+
+--select * from ods_erp_erp_purchase_goods t where t.pt = '${date}' and t.spu_id = '3267212';
+
+--select * from ods_erp_erp_product_spu  tt where tt.id = '3267212' and tt.pt = '${date}';
+-- SELECT * FROM dbo.Stock_Goods WHERE IsOut=0 AND IsLock=0 AND GoodsStatus=1
+
+-- UMS组织架构和OPS组织架构
+
+--
+--select a.id,a.parent_id,a.organizational_name,b.name,b.id as business_unit_id
+--from ods_ums_ums_org_organizational a
+--left join ods_looklook_looklook_tb_business_unit b
+--on (a.id = b.ums_id and b.pt = '${date}')
+--where a.pt = '${date}' and a.is_delete =0;
+
+
+--select *
+--from ods_looklook_looklook_tb_business_unit t
+--where t.pt = '${date}' and t.is_delete =0;
+--
+
+--ums ops 组织架构
+@ums_product_map:=
+select
+  product_bu,
+  business_unit
+from
+(
+    select
+      row_number() over (partition by a.product_bu,a.business_unit order by a.month desc) as rn,
+      a.product_bu,
+      a.business_unit
+    from static_looklook_looklook_ums_product_map a
+    where a.month<='${month}'
+) t
+where t.rn = 1
+;
+
+@ums_bu_info:=
+select
+ a.parent_name,a.id,a.child_name,b.product_bu
+from dwd_ums_org_info a
+inner join @ums_product_map b
+on (a.parent_name = b.business_unit)
+where a.dt = max_pt('dwd_ums_org_info')  and a.id is not null
+;
+
+-- ops 事业部维度 ums_id
+@ops_bu_info:=
+select
+*
+from
+(
+    select
+     a.id,
+     a.name,
+     a.ums_id,
+     row_number() over (partition by a.ums_id order by a.is_delete asc,a.create_time desc) as rn
+    from
+    (
+        select
+          t.id,
+          t.name,
+          t.ums_id,
+          t.rn,
+          t.create_time,
+          t.is_delete
+        from
+        (
+            select bu.id,bu.name,bu.ums_id,row_number() over (partition by bu.ums_id order by bu.is_delete asc,bu.create_time desc) as rn,bu.is_delete,bu.create_time
+            from ods_looklook_looklook_tb_business_unit bu
+            where bu.pt = max_pt('ods_looklook_looklook_tb_business_unit') and bu.ums_id is not null and bu.is_delete = 0
+        ) t
+        where t.rn =1
+        union
+        select
+          t.id,
+          t.name,
+          t.ums_id,
+          t.rn,
+          t.create_time,
+          t.is_delete
+        from
+        (
+          select
+            c.id,c.name,a.ums_id,row_number() over (partition by a.ums_id order by a.is_delete asc,a.create_time desc) as rn,a.is_delete,a.create_time
+          from ods_looklook_looklook_tb_group a
+          inner join ods_looklook_looklook_tb_project b
+          on (a.project_id = b.id and b.pt = max_pt('ods_looklook_looklook_tb_project') )
+          inner join ods_looklook_looklook_tb_business_unit c
+          on (b.business_unit_id = c.id and c.pt = max_pt('ods_looklook_looklook_tb_business_unit'))
+          where a.pt = max_pt('ods_looklook_looklook_tb_group') and a.ums_id is not null and a.is_delete = 0
+        ) t
+        where t.rn =1
+    ) a
+) ft
+where ft.rn = 1
+;
+
+--select * from @ops_bu_info t where t.name = 'RD独立项目部';
+
+
+@ums_to_ops_mapping:=
+select
+ t.product_bu,
+ t.ops_bu_name,
+ t.ops_bu_id
+from
+(
+    select
+    ums.product_bu,
+    ums.child_name,
+    ums.parent_name,
+    ops.name as ops_bu_name,
+    ops.id as ops_bu_id,
+    ums.id as ums_id
+  from @ums_bu_info ums
+  inner join @ops_bu_info ops
+  on (ums.id=ops.ums_id)
+) t
+group by
+  t.product_bu,
+  t.ops_bu_name,
+  t.ops_bu_id
+
+;
+
+--select * from @ums_to_ops_mapping t;
+
+
+@pd_category:=
+select
+ a.id,a.parent_id,a.level,a.cn_name,a.en_name
+from opdc.ods_bamboo_bamboo_pd_category a
+;
+
+@category_level:=
+select
+  pc.id,pc.parent_id,2 as level
+from @pd_category pc
+union all
+select
+  pc.id,pc1.parent_id,1 as level
+from @pd_category pc
+left join @pd_category pc1
+on (pc.parent_id = pc1.id)
+union all
+select
+  pc.id,pc.id,3 as level
+from @pd_category pc
+;
+
+--select a.*,row_number() over (partition by a.id order by a.level asc) as real_level from @category_level a where a.id = 49;
+@levels:=
+select
+ t.id,t.category_id,
+ case when real_level = 1 then cn_name end as 1_level_name,
+ case when real_level = 2 then cn_name end as 2_level_name,
+ case when real_level = 3 then cn_name end as 3_level_name
+from
+(
+    select
+      a.id,b.parent_id as category_id,b.cn_name,a.level,
+      row_number() over (partition by a.id order by a.level asc) as real_level
+    from @category_level a
+    inner join @pd_category b
+    on (nvl(a.parent_id,'-999999999999') = b.id)
+--    where a.id = 49
+) t
+;
+@product_category :=
+select
+   t.id
+  ,concat_ws(',',collect_set(t.1_level_name)) as 1_level_name
+  ,concat_ws(',',collect_set(t.2_level_name)) as 2_level_name
+  ,concat_ws(',',collect_set(t.3_level_name)) as 3_level_name
+from @levels t
+group by t.id
+;
+
+-- 商品部+品线+3级类目+折扣
+@product_style_info:=
+select
+  t.spu_id
+ ,concat_ws(',',collect_set(t.first_product_style)) as first_product_style
+ ,concat_ws(',',collect_set(t.product_style)) as product_style
+from
+(
+    select
+      psav.spu_id
+     ,case when bpa.name = '一级品线' then pav.value end as first_product_style
+     ,case when bpa.name = '风格线' then pav.value end as product_style
+  from opdc.ods_bamboo_bamboo_pd_spu_attribute_value psav
+  inner join opdc.ods_bamboo_bamboo_pd_attribute bpa
+  on (psav.attribute_id =bpa.id and bpa.name in ('一级品线','风格线') and 1=1 and bpa.is_delete = 0)
+  inner join opdc.ods_bamboo_bamboo_pd_attribute_value pav
+  on (psav.attribute_value_id = pav.id and 1=1 and pav.is_delete = 0)
+  where  psav.is_delete = 0
+) t
+group by t.spu_id
+;
+
+--select * from @product_style_info a where a.spu_id = '1453308364193841153';
+
+@spu_style_info_pre:=
+select
+   t.product_no
+  ,t.choose_department_name
+  ,t.first_product_style
+  ,t.product_style
+  ,t.product_bu
+  ,t.id
+  ,t.discount_rate
+  ,t.category_id
+  ,t.1_level_name
+  ,t.2_level_name
+  ,t.3_level_name
+  ,row_number() over (partition by t.product_no order by t.system asc) as rn --优先取lms系统的数据
+from
+(
+    select
+       bps.product_no
+      ,bps.choose_department_name
+      ,psi.first_product_style
+      ,psi.product_style
+      ,split(psi.first_product_style,'_')[0] as product_bu
+      ,bps.id
+      ,nvl(scp.discount,100)/100 as discount_rate
+      ,bps.category_id
+      ,pc.1_level_name
+      ,pc.2_level_name
+      ,pc.3_level_name
+      ,'1' as system
+    from opdc.ods_bamboo_bamboo_pd_spu bps
+    left join @product_style_info psi
+    on (bps.id = psi.spu_id)
+    left join opdc.ods_bamboo_pd_spu_sku_clearance_price scp
+    on (bps.id = scp.pd_spu_id and scp.is_delete = 0 and scp.pt= '${date}')
+    left join @product_category pc
+    on (bps.category_id = pc.id)
+    where 1=1 and bps.is_delete = 0
+) t
+;
+--select * from @spu_style_info_pre a where a.product_no = 'SP21102714AO';
+
+
+@spu_style_info:=
+select
+   t.product_no
+  ,t.choose_department_name
+  ,t.first_product_style
+  ,t.product_style
+  ,t.product_bu
+  ,t.discount_rate
+  ,t.category_id
+  ,t.1_level_name
+  ,t.2_level_name
+  ,t.3_level_name
+from @spu_style_info_pre t
+where t.rn = 1;
+
+
+
+--select * from @spu_style_info t where t.product_no = 'A8E779E64EAE';
+--select a.product_no,a.product_bu,count(1) as cnt
+--from @spu_style_info a
+--group by a.product_no,a.product_bu
+--having count(1)>1;
+
+@lms_product_info:=
+select
+  a.product_no,
+  a.choose_department_name,
+  a.first_product_style,
+  a.product_style,
+  a.product_bu,
+  a.discount_rate,
+  a.category_id,
+  a.1_level_name,
+  a.2_level_name,
+  a.3_level_name,
+  nvl(b.ops_bu_name,'全公司') as ops_bu_name,
+  nvl(b.ops_bu_id,'-1') as ops_bu_id
+from @spu_style_info a
+left join @ums_to_ops_mapping b
+on (a.product_bu = b.product_bu)
+;
+
+
+
+-- 只取10.1号开款的商品 存库减值
+@spu_choose_date:=
+select
+    t1.*
+from
+(
+    select
+      t.product_no,
+      t.choose_date,
+      t.choose_user_name,
+      t.system,
+      t.supply_price,
+      t.purchase_guide_max_price,
+      t.purchase_guide_min_price
+    from
+    (
+        select
+          t.product_no,
+          t.choose_date,
+          row_number() over (partition by t.product_no order by t.levels asc) as rn,
+          t.system,
+          t.supply_price,
+          t.purchase_guide_max_price,
+          t.purchase_guide_min_price,
+          t.choose_user_name
+        from
+        (
+          select
+            a.product_no,
+            a.first_choose_user_date as choose_date,
+            if(lower(nvl(a.system,'other'))='lms',1,2) as levels, --优先从lms系统取 取不到再从其他系统取
+            a.system,
+            a.supply_price,
+            a.purchase_guide_max_price,
+            a.purchase_guide_min_price,
+            a.choose_user_name as choose_user_name
+          from opdc.dim_spu a
+        ) t
+    ) t
+    where t.rn =1
+) t1
+where to_char(t1.choose_date,'yyyymmdd')>='20211001' and to_char(t1.choose_date,'yyyymm')<='${month}'
+;
+
+-- spu 平均采购成本 -- 10月用erp的表  之后用opdc.dim_spu_price
+
+@product_stock_info:=
+select
+  a.product_no,
+  sum(a.inventory_qty) as stock_amt
+from opdc.dw_erp_stock_goods_history a
+where a.pt='${date}' and a.product_no is not null
+group by a.product_no;
+
+@erp_spu_info:=
+select
+  scd.product_no,
+  case when psp.product_avg_cost!=0 then product_avg_cost
+       when scd.supply_price!=0 then supply_price
+       when scd.purchase_guide_max_price!=0 then purchase_guide_max_price
+       when scd.purchase_guide_min_price!=0 then purchase_guide_min_price
+  end as product_cost,
+  nvl(psi.stock_amt,0) as stock_amt,
+  psp.source,
+  scd.choose_date,
+  scd.choose_user_name
+from @spu_choose_date scd
+left join
+(
+
+  select
+    ps.old_no as product_no,
+    nvl(avg(pg.cost),0) as product_avg_cost,
+    'erp' as source
+  from ods_erp_erp_purchase_goods pg
+  inner join ods_erp_erp_product_spu ps
+  on (pg.spu_id = ps.id and ps.pt = max_pt('ods_erp_erp_product_spu'))
+  where pg.pt = '20211031' and substring(pg.pt,1,6) = '${month}'
+  group by ps.old_no
+  union all
+  select
+    a.product_no,
+    nvl(max(a.avg_purchase_price),0) as avg_purchase_price,
+    'opdc' as source
+  from opdc.dim_spu_price a
+  where a.pt='${date}' and a.pt>='20211101'
+  group by a.product_no
+) psp
+on (scd.product_no = psp.product_no)
+left join @product_stock_info psi
+on (scd.product_no = psi.product_no)
+;
+
+
+--create table tmp_stock_devalue as  select * from @erp_spu_info a ;
+
+--select * from @erp_spu_info a where a.sku_id = '6381860';
+--select * from @lms_product_info t where t.product_no = 'A8E779E64EAE';
+-- 事业部 月度收入
+@bu_month_gmv:=
+select
+  t.business_unit_id,
+  t.site_gmv,
+  t.site_name,
+  t.site_id,
+  t.product_bu,
+  sum(t.site_gmv) over (partition by t.product_bu) as product_bu_gmv,
+  sum(t.site_gmv) over (partition by t.business_unit_id) as bu_gmv
+from
+(
+  select
+    sum(a.total_amount) as site_gmv,
+    b.business_unit_id,
+    nvl(c.product_bu,'全公司') as product_bu,
+    a.site_id,
+    b.site_name
+  from app_looklook_daily_site_gmv_info_currency a
+  inner join dwd_com_site_org_info b
+  on (a.site_id = b.site_id and b.pt = max_pt('dwd_com_site_org_info'))
+  left  join (select c.ops_bu_id,c.product_bu from @ums_to_ops_mapping c group by c.ops_bu_id,c.product_bu) c
+  on (b.business_unit_id = c.ops_bu_id)
+  where a.pt = max_pt('app_looklook_daily_site_gmv_info_currency') and substring(a.data_dt,1,6) = '${month}' and a.total_amount!=0
+  group by b.business_unit_id,nvl(c.product_bu,'全公司'),a.site_id,b.site_name
+) t
+;
+--select * from @bu_month_gmv;
+--drop table tmp_stock_devalue;
+--create table tmp_stock_devalue
+--as
+-- 本月的减值率=本月设置的减值率-上月设置减值率 如果本月设置的减值率是0 则不减
+@devalue_rate:=
+select
+*
+from
+(
+  select row_number() over (partition by a.product order by a.pt desc) as rn,a.id,a.product as proudct_spu,a.rate
+  from opdc.stock_rate a
+  where substring(a.pt,1,6)='${month}'
+) t
+where t.rn =1
+;
+
+--drop table  tmp_stock_devalue;
+
+insert overwrite table dwd_looklook_proudct_stock_devalue_info partition(mt= '${month}')
+select
+  a.product_no,
+  a.product_cost,
+  a.stock_amt,
+  nvl(b.product_bu,'全公司') as product_bu,
+  b.first_product_style,
+  b.product_style,
+  c.site_name,
+  c.site_id,
+  nvl(b.ops_bu_id,'-1') as ops_bu_id,
+  nvl(b.ops_bu_name,'全公司') as ops_bu_name,
+  b.discount_rate,
+  b.1_level_name,
+  b.2_level_name,
+  b.3_level_name,
+  nvl(c.bu_gmv,0) as bu_month_gmv, -- 事业部月度收入
+  nvl(d.product_bu_gmv,0) as product_bu_month_gmv, --商品部月度收入
+  nvl(c.site_gmv,0) as site_gmv,
+  case when nvl(c.product_bu_gmv,0)= 0 then 0 else nvl(c.site_gmv,0)/nvl(c.product_bu_gmv,0) end as site_gmv_rate, -- 站点收入与商品部收入占比
+  a.product_cost*a.stock_amt as stock_value,--存货金额
+  a.product_cost*a.stock_amt*nvl(e.rate,0) as stock_devalue,--存货减值金额  没有减值比例的 给0
+  '${month}' as data_month,
+  nvl(e.rate,0) as devalue_rate, -- 减值比例
+  a.choose_user_name,
+  to_char(a.choose_date,'yyyymmdd') as choose_date
+from @erp_spu_info a
+left join @lms_product_info b
+on (a.product_no = b.product_no)
+left join @bu_month_gmv c
+on (b.ops_bu_id =c.business_unit_id)
+left join (select d.product_bu,d.product_bu_gmv from @bu_month_gmv d group by d.product_bu,d.product_bu_gmv) d
+on (b.product_bu =d.product_bu)
+left join @devalue_rate e
+on (a.product_no = e.proudct_spu)
+--where a.product_no = 'SP211029RJ4D'
+;

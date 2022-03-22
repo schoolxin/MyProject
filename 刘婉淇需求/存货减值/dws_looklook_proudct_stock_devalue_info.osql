@@ -1,0 +1,37 @@
+--name:dws_looklook_proudct_stock_devalue_info
+--author:order
+--create time:2021-11-26 18:18
+insert overwrite table dws_looklook_proudct_stock_devalue_info partition (pt = '${date}')
+select
+  a.product_no,
+  a.product_cost,
+  a.stock_amt,
+  a.product_bu,
+  a.first_product_style,
+  a.product_style,
+  a.site_name,
+  a.site_id,
+  a.ops_bu_id,
+  a.ops_bu_name,
+  a.discount_rate,
+  a.1_level_name,
+  a.2_level_name,
+  a.3_level_name,
+  a.bu_month_gmv,
+  a.product_bu_month_gmv,
+  a.site_gmv,
+  a.site_gmv_rate,
+  a.data_month,
+  a.stock_value as current_month_stock_value, --当月存货金额
+  a.stock_devalue as current_month_stock_devalue, --当月存货减值金额
+  a.devalue_rate as current_month_devalue_rate,--当月减值比例
+  a.site_gmv_rate*a.stock_devalue as current_month_site_stock_devalue, --当月站点存货减值金额
+  b.stock_value as past_month_stock_value, --上月存货金额
+  b.stock_devalue as past_month_stock_devalue, --上月存货减值金额
+  b.devalue_rate as past_month_devalue_rate, --上月减值比例
+  b.site_gmv_rate*b.stock_devalue as past_month_site_stock_devalue --上月站点存货减值金额
+from dwd_looklook_proudct_stock_devalue_info a
+left join dwd_looklook_proudct_stock_devalue_info b
+on (a.site_id = b.site_id and a.product_no = b.product_no and b.mt = '${past_month}')
+where a.mt = '${month}'
+;

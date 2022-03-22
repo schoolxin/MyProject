@@ -1,0 +1,154 @@
+--name:app_looklook_daily_site_gmv_info_currency
+--author:order
+--create time:2021-11-01 11:32
+
+@mapping_erp_site_info:=
+select
+    t2.site_id as ops_site_id,
+    t2.site_name,
+    t2.erp_site_id
+from
+(
+    select
+    t1.site_name,
+    t1.site_id,
+    t1.erp_site_id,
+    t1.status,
+    row_number() over (partition by t1.erp_site_id order by t1.status asc) as rn
+    from
+    (
+        select
+            a.site_name,
+            a.site_id,
+            case when b.site_type_id = 4 then a.cod_erp_site_id else a.erp_site_id end as erp_site_id,
+            b.status
+        from dwd_mapping_erp_site_id a
+        join ods_looklook_looklook_tb_site b
+        on (a.site_id = b.id and b.pt='${date}')
+        where a.pt='${date}'
+    ) t1
+) t2
+where t2.rn =1
+
+;
+-- 由于要过滤掉cod未审单的订单，所以订单全部从OMS或ERP取数据
+@erp_sale_amount :=
+select
+   to_char(osp.paytime,'yyyymmdd') as data_dt
+  ,esi.ops_site_id as site_id
+  ,soi.site_name
+  ,soi.site_type_id
+  ,sum(osp.order_amt*cct.currency_transform) as total_amount_usd
+  ,sum(osp.order_amt*cct.currency_transform_cny) as total_amount
+  ,count(distinct osp.order_id) as order_cnt
+from
+(
+  select osp.currency_name as currency_code ,osp.order_amt,osp.order_id,osp.paytime
+  from opdc.dwd_order_sales_process osp
+  where osp.change_type = '下单' and osp.order_amt>0 and to_char(osp.paytime,'yyyymmdd')>='20211001'
+  group by osp.currency_name,osp.order_amt,osp.order_id,osp.paytime
+) osp
+inner join (
+      select b.order_id,b.site_id
+      from opdc.dwd_order_order_appendix b
+      where upper(nvl(b.pay_type,'others')) not in ('货到付款','COD')
+      group by b.order_id,b.site_id
+      union all
+      select b.order_id,b.site_id
+      from opdc.dwd_order_order_appendix b
+      where upper(b.pay_type)  in ('货到付款','COD') and b.site_order_status!='处理中' and lower(b.sys_source) = 'oms' -- erp只拉取site_order_status =2的数据
+      group by b.order_id,b.site_id
+      union all
+      select b.order_id,b.site_id
+      from opdc.dwd_order_order_appendix b
+      where upper(b.pay_type)  in ('货到付款','COD') and lower(b.sys_source) = 'erp'
+      group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+inner join @mapping_erp_site_info  esi
+on (ooa.site_id = esi.erp_site_id)
+left join dwd_com_site_org_info soi
+on esi.ops_site_id=soi.site_id and soi.pt=max_pt('dwd_com_site_org_info')
+left join dwd_com_currency_transform cct
+on to_char(osp.paytime,'yyyymmdd')=cct.data_dt and cct.currency_code= osp.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where 1=1
+group by
+   to_char(osp.paytime,'yyyymmdd')
+  ,esi.ops_site_id
+  ,soi.site_type_id
+  ,soi.site_name
+union all
+-- 宝宝派数据
+select
+   to_char(osp.paytime,'yyyymmdd') as data_dt
+  ,esi.ops_site_id as site_id
+  ,soi.site_name
+  ,soi.site_type_id
+  ,sum(osp.order_amt*cct.currency_transform) as total_amount_usd
+  ,sum(osp.order_amt*cct.currency_transform_cny) as total_amount
+  ,count(distinct osp.order_id) as order_cnt
+from
+(
+  select osp.currency_name as currency_code ,osp.order_amt,osp.order_id,osp.paytime
+  from popopiedc.dwd_order_sales_process osp
+  where osp.change_type = '下单' and osp.order_amt>0 and to_char(osp.paytime,'yyyymmdd')>='20211001'
+  group by osp.currency_name,osp.order_amt,osp.order_id,osp.paytime
+) osp
+inner join (
+      select b.order_id,b.site_id
+      from popopiedc.dwd_order_order_appendix b
+      where upper(nvl(b.pay_type,'others')) not in ('货到付款','COD')
+      group by b.order_id,b.site_id
+      union all
+      select b.order_id,b.site_id
+      from popopiedc.dwd_order_order_appendix b
+      where upper(b.pay_type)  in ('货到付款','COD') and b.site_order_status!='处理中' and lower(b.sys_source) = 'oms' -- erp只拉取site_order_status =2的数据
+      group by b.order_id,b.site_id
+      union all
+      select b.order_id,b.site_id
+      from popopiedc.dwd_order_order_appendix b
+      where upper(b.pay_type)  in ('货到付款','COD') and lower(b.sys_source) = 'erp'
+      group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+inner join @mapping_erp_site_info  esi
+on (ooa.site_id = esi.erp_site_id)
+left join dwd_com_site_org_info soi
+on esi.ops_site_id=soi.site_id and soi.pt=max_pt('dwd_com_site_org_info')
+left join dwd_com_currency_transform cct
+on to_char(osp.paytime,'yyyymmdd')=cct.data_dt and cct.currency_code= osp.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where 1=1
+group by
+   to_char(osp.paytime,'yyyymmdd')
+  ,esi.ops_site_id
+  ,soi.site_type_id
+  ,soi.site_name
+;
+
+
+@sale_amount :=
+select
+ t.data_dt,
+ t.site_id,
+ t.site_name,
+ t.total_amount,
+ t.site_type_id,
+ t.order_cnt,
+ soi.business_unit_name
+from @erp_sale_amount t
+left join dwd_com_site_org_info soi
+on soi.site_id=t.site_id and soi.pt=max_pt('dwd_com_site_org_info')
+;
+
+insert overwrite table app_looklook_daily_site_gmv_info_currency partition(pt='${date}')
+select
+  t.data_dt,
+  bigint(t.site_id) as site_id,
+  t.site_name,
+  t.total_amount,
+  t.site_type_id,
+  0 as platform_fees,
+  t.order_cnt,
+  t.business_unit_name
+from @sale_amount t
+;

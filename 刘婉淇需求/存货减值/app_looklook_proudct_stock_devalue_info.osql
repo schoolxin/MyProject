@@ -1,0 +1,22 @@
+insert overwrite table app_looklook_proudct_stock_devalue_info partition(pt= '${month}')
+select
+  a.site_name,
+  a.site_id,
+  a.product_bu,
+  a.ops_bu_name,
+  a.ops_bu_id,
+  max(a.site_gmv) as site_gmv,
+  sum(a.site_gmv_rate*a.stock_value) as site_stock_value,
+  sum(a.site_gmv_rate*a.stock_devale) as site_stock_devale,
+  md5(concat(nvl(a.site_name,'other'),nvl(a.site_id,0),a.product_bu,a.ops_bu_name,a.ops_bu_id,'${month}')) as key_id,
+  '${month}' as data_month,
+  sum(a.site_gmv_rate*a.stock_value_discount) as site_stock_value_discount
+from dwd_looklook_proudct_stock_devalue_info a
+where a.pt = '${month}'
+group by
+  a.site_name,
+  a.site_id,
+  a.product_bu,
+  a.ops_bu_name,
+  a.ops_bu_id
+;
