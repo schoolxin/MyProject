@@ -125,6 +125,7 @@ select
     bta.logistics_delivery_time
    ,upper(bta.express_no) as express_no
    ,bta.actual_shipping_fee
+   ,bta.input_time
    ,case when bta.cod_currency = 'RMB' then 'CNY' else bta.cod_currency end as cod_currency
 from
 (
@@ -133,6 +134,7 @@ from
      ,bta.express_no
      ,bta.actual_shipping_fee
      ,bta.cod_currency
+     ,bta.input_time
   from
   (
     select
@@ -141,10 +143,11 @@ from
      ,btal.actual_shipping_fee
      ,1 as levels
      ,btal.cod_currency
+     ,btal.input_time
     from ods_erp_erp_finance_cod_shipment_back_to_article_full btal
     left anti join (select btal1.express_no from ods_erp_erp_popopie_finance_cod_shipment_back_to_article_full btal1 where btal1.pt = '${date}') btal1
     on (upper(btal.express_no) = upper(btal1.express_no))
-    where btal.pt = '${date}' and to_char(btal.logistics_delivery_time,'yyyymmdd')>='20211201'
+    where btal.pt = '${date}' and to_char(btal.logistics_delivery_time,'yyyymmdd')>='20211101'
     union all
     select
       btal.logistics_delivery_time
@@ -152,10 +155,11 @@ from
      ,btal.actual_shipping_fee
      ,2 as levels
      ,btal.cod_currency
+     ,btal.input_time
     from ods_erp_erp_popopie_finance_cod_shipment_back_to_article_full btal
     left anti join (select btal1.express_no from ods_erp_erp_finance_cod_shipment_back_to_article_full btal1 where btal1.pt = '${date}') btal1
     on (upper(btal.express_no) = upper(btal1.express_no))
-    where btal.pt = '${date}' and to_char(btal.logistics_delivery_time,'yyyymmdd')>='20211201'
+    where btal.pt = '${date}' and to_char(btal.logistics_delivery_time,'yyyymmdd')>='20211101'
   ) bta
 ) bta
 ;
@@ -180,6 +184,9 @@ select
  ,nm.order_no
  ,cp.actual_shipping_fee*cct.currency_transform as shipment_cost_usd
  ,cp.actual_shipping_fee*cct.currency_transform_cny as shipment_cost_cny
+ ,to_char(cp.input_time,'yyyymmdd') as input_date
+ ,cp.cod_currency
+ ,cp.actual_shipping_fee
 from @shipment_cost_pre cp
 left join @order_delivery_info nm
 on (cp.express_no = nm.expressno)
@@ -200,6 +207,10 @@ select
  ,sc.erp_order_id
  ,nvl(sc.shipment_cost_cny,0) as shipment_cost_cny
  ,0 as head_cost_cny
+ ,sc.input_date
+ ,sc.cod_currency
+ ,sc.actual_shipping_fee
+ ,'尾程' as fee_type
 from @shipment_cost sc
 union all
 select
@@ -212,9 +223,13 @@ select
  ,sc.erp_order_id
  ,0 as shipment_cost_cny
  ,nvl(sc.head_cost_cny,0) as head_cost_cny
+ ,'' as input_date
+ ,'' as cod_currency
+ ,0 as actual_shipping_fee
+ ,'头程' as fee_type
 from @head_cost sc
 ;
 
 select *
 from @logistics_cost_detail_pre a
-where a.data_dt between '20220101' and '20220131' and a.site_id in (18995,19079,19081);
+where a.data_dt between '20211101' and '20211131' and a.site_id in (18064,18170,18787,18995,19079,19081,19166,19172);
