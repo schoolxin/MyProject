@@ -39,6 +39,7 @@ where t.rn =1
 @site_delivery_info_oms:=
 select
      t.erp_order_id
+    ,t.orderno
     ,concat_ws(",",collect_list(t.expressno)) as  expressno
     ,concat_ws(",",collect_list(t.company_name)) as  company_name
     ,sum(if(t.deliverytime is not null,1,0)) as delivery_cnt
@@ -51,6 +52,7 @@ from
     ,lps.deliverytime
     ,rio.receipttime
     ,lps.company_name
+    ,lps.orderno
   from opdc.dw_logistics_package_shipments lps --opdc 网红订单在erp中创建的  该表中新数据没有网红订单 所以无需过滤
   inner join (select t.order_id,t.erp_order_id from opdc.dwd_order_sales_process t group by t.order_id,t.erp_order_id) t
   on (string(lps.order_id) = nvl(t.order_id,t.erp_order_id))
@@ -62,6 +64,7 @@ from
     ,lps.deliverytime
     ,rio.receipttime
     ,lps.company_name
+    ,lps.orderno
   union all
   select
      nvl(t.erp_order_id,t.order_id) as erp_order_id
@@ -69,6 +72,7 @@ from
     ,lps.deliverytime
     ,rio.receipttime
     ,lps.company_name
+    ,lps.orderno
   from popopiedc.dw_logistics_package_shipments lps
   inner join (select t.order_id,t.erp_order_id from popopiedc.dwd_order_sales_process t group by t.order_id,t.erp_order_id) t
   on (string(lps.order_id) = nvl(t.order_id,t.erp_order_id))
@@ -80,9 +84,10 @@ from
     ,lps.deliverytime
     ,rio.receipttime
     ,lps.company_name
+    ,lps.orderno
 ) t
 group by
-     t.erp_order_id
+     t.erp_order_id,t.orderno
 ;
 --paypal 交易数据
 @paypal_receive:=
@@ -166,6 +171,7 @@ select
   ,e.receipt_cnt
   ,d.order_id as paypal_order_id
   ,'云站' as site_type
+  ,e.orderno
 from dwd_looklook_cloud_order_info a
 inner join orderplus_hk.ods_cloud_orderplus_db_tb_order b
 on (a.id = b.id and b.pt = '${date}')
@@ -196,6 +202,7 @@ select
   ,e.receipt_cnt
   ,d.order_id as paypal_order_id
   ,'独立站' as site_type
+  ,e.orderno
 from dwd_looklook_spsite_order_info a
 left join dwd_mapping_erp_order_id c
 on (string(a.order_sn) = c.site_order_id and c.pt = '${date}')
@@ -224,6 +231,7 @@ select
   ,e.receipt_cnt
   ,d.order_id as paypal_order_id
   ,'店匠' as site_type
+  ,e.orderno
 from dwd_looklook_shoplazza_order_info a
 left join dwd_mapping_erp_order_id c
 on (string(a.id) = c.site_order_id and c.pt = '${date}')
@@ -252,6 +260,7 @@ select
   ,e.receipt_cnt
   ,d.order_id as paypal_order_id
   ,'shopify' as site_type
+  ,e.orderno
 from dwd_looklook_shopify_order_info a
 left join dwd_mapping_erp_order_id c
 on (string(a.id) = c.site_order_id and c.pt = '${date}')
@@ -280,6 +289,7 @@ select
   ,e.receipt_cnt
   ,d.order_id as paypal_order_id
   ,'shopline' as site_type
+  ,e.orderno
 from dwd_looklook_shopline_order_info a
 left join dwd_mapping_erp_order_id c
 on (string(a.id) = c.site_order_id and c.pt = '${date}')
@@ -295,8 +305,7 @@ and lower(a.pay_type) rlike 'paypal' and lower(a.financial_status) in ('paid','p
 
 
 
-create table tmp_site_paypal_order_info
-as
+@datas:=
 select
    a.order_id
   ,a.order_no as order_no
@@ -312,6 +321,7 @@ select
   ,a.receipt_cnt
   ,a.paypal_order_id
   ,a.site_type
+  ,a.orderno
 from @shopline_order_info a
 union all
 select
@@ -329,6 +339,7 @@ select
   ,a.receipt_cnt
   ,a.paypal_order_id
   ,a.site_type
+  ,a.orderno
 from @shopify_order_info a
 union all
 select
@@ -346,6 +357,7 @@ select
   ,a.receipt_cnt
   ,a.paypal_order_id
   ,a.site_type
+  ,a.orderno
 from @shoplazza_order_info a
 union all
 select
@@ -363,6 +375,7 @@ select
   ,a.receipt_cnt
   ,a.paypal_order_id
   ,a.site_type
+  ,a.orderno
 from @berrylook_order_info a
 union all
 select
@@ -380,5 +393,100 @@ select
   ,a.receipt_cnt
   ,a.paypal_order_id
   ,a.site_type
+  ,a.orderno
 from @cloud_order_info a
 ;
+
+
+select * from @datas a
+where a.orderno in (
+'ORD-27290328',
+'ORD-27293278',
+'ORD-27293494',
+'ORD-27294007',
+'ORD-27294374',
+'ORD-27294764',
+'ORD-27296752',
+'ORD-27298566',
+'ORD-27298934',
+'ORD-27299068',
+'ORD-27300798',
+'ORD-27307522',
+'ORD-27308498',
+'ORD-27308677',
+'ORD-27309484',
+'ORD-27311116',
+'ORD-27311235',
+'ORD-27311541',
+'ORD-27312346',
+'ORD-27312357',
+'ORD-27314344',
+'ORD-27314646',
+'ORD-27316150',
+'ORD-27316995',
+'ORD-27319144',
+'ORD-27319798',
+'ORD-27327349',
+'ORD-27328728',
+'ORD-27329896',
+'ORD-27332420',
+'ORD-27334269',
+'ORD-27334567',
+'ORD-27342019',
+'ORD-27343090',
+'ORD-27344775',
+'ORD-27345758',
+'ORD-27348618',
+'ORD-27349691',
+'ORD-27351320',
+'ORD-27352025',
+'ORD-27352858',
+'ORD-27353891',
+'ORD-27354308',
+'ORD-27354314',
+'ORD-27354686',
+'ORD-27354780',
+'ORD-27355644',
+'ORD-27357149',
+'ORD-27362146',
+'ORD-27363766',
+'ORD-27366904',
+'ORD-27367265',
+'ORD-27368853',
+'ORD-27372270',
+'ORD-27374249',
+'ORD-27375159',
+'ORD-27378714',
+'ORD-27378963',
+'ORD-27379112',
+'ORD-27380568',
+'ORD-27381259',
+'ORD-27381644',
+'ORD-27381753',
+'ORD-27382116',
+'ORD-27383787',
+'ORD-27384001',
+'ORD-27384053',
+'ORD-27384520',
+'ORD-27385059',
+'ORD-27385434',
+'ORD-27385902',
+'ORD-27386300',
+'ORD-27387267',
+'ORD-27387377',
+'ORD-27388090',
+'ORD-27388529',
+'ORD-27389419',
+'ORD-27389455',
+'ORD-27389599',
+'ORD-27389984',
+'ORD-27390287',
+'ORD-27390630',
+'ORD-27390815',
+'ORD-27391215',
+'ORD-27391413',
+'ORD-27391832',
+'ORD-27290645',
+'ORD-27384720',
+'ORD-27371607'
+);

@@ -1,0 +1,1 @@
+select * from dwd_looklook_cod_report_head_tail_tax_cost_info a where a.pt = '${date}' and a.统计日期 >='20220201';

@@ -54,13 +54,23 @@ select
   ,lps.codcurrencyprice
   ,lps.expressid
   ,lps.express_name
+  ,lps.company_name
   ,lps.deliverytime
   ,lps.fristtime
   ,lps.fristfee
+  ,nvl(f.input_date,'') as input_date
 from opdc.dw_logistics_package_shipments lps
+left join (
+  select upper(f.expressno) as express_no,concat_ws(",",collect_set(to_char(f.createtime,'yyyymmdd'))) as input_date
+  from ods_erp_erp_finance_logistics_billdetail_full  f --线下账单
+  where f.isdeleted= 0 and f.pt = '${date}' and f.costtype = 11
+  group by upper(f.expressno)
+) f
+on (upper(lps.expressno) = f.express_no )
 where 1=1
 and lps.deliverystatus != '清关退回'
 and lps.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) -- 剔除掉网红手工订单
+and lps.order_id not in (select cast(id as string) from opdc.ods_oms_order_order where order_type = 1) -- 剔除网红订单
 group by
    lps.order_id
   ,lps.siteid
@@ -69,8 +79,10 @@ group by
   ,lps.expressid
   ,lps.express_name
   ,lps.deliverytime
+  ,lps.company_name
   ,lps.fristtime
   ,lps.fristfee
+  ,nvl(f.input_date,'')
 union all
 select
    lps.order_id
@@ -79,10 +91,19 @@ select
   ,lps.codcurrencyprice
   ,lps.expressid
   ,lps.express_name
+  ,lps.company_name
   ,lps.deliverytime
   ,lps.fristtime
   ,lps.fristfee
+  ,nvl(f.input_date,'') as input_date
 from popopiedc.dw_logistics_package_shipments lps
+left join (
+  select upper(f.expressno) as express_no,concat_ws(",",collect_set(to_char(f.createtime,'yyyymmdd'))) as input_date
+  from ods_erp_erp_popopie_finance_logistics_billdetail_full  f --线下账单
+  where f.isdeleted= 0 and f.pt = '${date}' and f.costtype = 11
+  group by upper(f.expressno)
+) f
+on (upper(lps.expressno) = f.express_no )
 where 1=1
 and lps.deliverystatus != '清关退回'
 --and to_char(lps.deliverytime,'yyyymm')>='20211201'
@@ -97,6 +118,8 @@ group by
   ,lps.deliverytime
   ,lps.fristtime
   ,lps.fristfee
+  ,lps.company_name
+  ,nvl(f.input_date,'')
 ;
 
 --头程成本
@@ -106,10 +129,12 @@ select
   ,nvl(esi.site_name,'others') as site_name
   ,dio.expressno
   ,dio.express_name
+  ,dio.company_name
   ,oio.order_no
   ,oio.erp_order_id
   ,to_char(dio.fristtime,'yyyymmdd') as data_dt
   ,nvl(dio.fristfee,0) as head_cost_cny
+  ,dio.input_date
 from @order_info_oms oio
 inner join @site_delivery_info_oms dio
 on (nvl(oio.order_id,oio.erp_order_id) = dio.order_id and oio.site_id = dio.siteid)
@@ -119,7 +144,7 @@ where to_char(dio.fristtime,'yyyymmdd')<='${date}'
 ;
 
 
---尾程成本
+--尾程成本 start
 @shipment_cost_pre:=
 select
     bta.logistics_delivery_time
@@ -127,6 +152,8 @@ select
    ,bta.actual_shipping_fee
    ,bta.input_time
    ,case when bta.cod_currency = 'RMB' then 'CNY' else bta.cod_currency end as cod_currency
+   ,bta.express_name
+   ,bta.company_name
 from
 (
   select
@@ -135,31 +162,73 @@ from
      ,bta.actual_shipping_fee
      ,bta.cod_currency
      ,bta.input_time
+     ,bta.express_name
+     ,bta.company_name
   from
   (
-    select
-      btal.logistics_delivery_time
-     ,btal.express_no
-     ,btal.actual_shipping_fee
-     ,1 as levels
-     ,btal.cod_currency
-     ,btal.input_time
-    from ods_erp_erp_finance_cod_shipment_back_to_article_full btal
-    left anti join (select btal1.express_no from ods_erp_erp_popopie_finance_cod_shipment_back_to_article_full btal1 where btal1.pt = '${date}') btal1
-    on (upper(btal.express_no) = upper(btal1.express_no))
-    where btal.pt = '${date}' and to_char(btal.logistics_delivery_time,'yyyymmdd')>='20211101'
-    union all
-    select
-      btal.logistics_delivery_time
-     ,btal.express_no
-     ,btal.actual_shipping_fee
-     ,2 as levels
-     ,btal.cod_currency
-     ,btal.input_time
-    from ods_erp_erp_popopie_finance_cod_shipment_back_to_article_full btal
-    left anti join (select btal1.express_no from ods_erp_erp_finance_cod_shipment_back_to_article_full btal1 where btal1.pt = '${date}') btal1
-    on (upper(btal.express_no) = upper(btal1.express_no))
-    where btal.pt = '${date}' and to_char(btal.logistics_delivery_time,'yyyymmdd')>='20211101'
+      select
+        t.logistics_delivery_time
+       ,t.express_no
+       ,t.actual_shipping_fee
+       ,t.levels
+       ,t.cod_currency
+       ,t.input_time
+       ,t.express_id
+       ,t.company_id
+       ,b.name as express_name
+       ,c.name as company_name
+      from
+      (
+          select
+            btal.logistics_delivery_time
+           ,btal.express_no
+           ,btal.actual_shipping_fee
+           ,1 as levels
+           ,btal.cod_currency
+           ,btal.input_time
+           ,btal.express_id
+           ,btal.company_id
+          from ods_erp_erp_finance_cod_shipment_back_to_article_full btal
+          left anti join (select btal1.express_no from ods_erp_erp_popopie_finance_cod_shipment_back_to_article_full btal1 where btal1.pt = '${date}') btal1
+          on (upper(btal.express_no) = upper(btal1.express_no))
+          where btal.pt = '${date}' and to_char(btal.logistics_delivery_time,'yyyymmdd')>='20211101'
+      ) t
+      left join ods_erp_erp_logistics_express b
+      on (t.express_id = b.id and b.pt = '${date}')
+      left join ods_erp_erp_logistics_company c
+      on (t.company_id = c.id and c.pt = '${date}')
+      union all
+      select
+        t.logistics_delivery_time
+       ,t.express_no
+       ,t.actual_shipping_fee
+       ,t.levels
+       ,t.cod_currency
+       ,t.input_time
+       ,t.express_id
+       ,t.company_id
+       ,b.name as express_name
+       ,c.name as company_name
+      from
+      (
+          select
+              btal.logistics_delivery_time
+             ,btal.express_no
+             ,btal.actual_shipping_fee
+             ,2 as levels
+             ,btal.cod_currency
+             ,btal.input_time
+             ,btal.express_id
+             ,btal.company_id
+          from ods_erp_erp_popopie_finance_cod_shipment_back_to_article_full btal
+          left anti join (select btal1.express_no from ods_erp_erp_finance_cod_shipment_back_to_article_full btal1 where btal1.pt = '${date}') btal1
+          on (upper(btal.express_no) = upper(btal1.express_no))
+          where btal.pt = '${date}' and to_char(btal.logistics_delivery_time,'yyyymmdd')>='20211101'
+      ) t
+      left join ods_erp_erp_popopie_logistics_express b
+      on (t.express_id = b.id and b.pt = '${date}')
+      left join ods_erp_erp_popopie_logistics_company c
+      on (t.company_id = c.id and c.pt = '${date}')
   ) bta
 ) bta
 ;
@@ -179,7 +248,8 @@ select
  ,nvl(s.site_name,'others') as site_name
  ,to_char(cp.logistics_delivery_time,'yyyymmdd') as data_dt
  ,cp.express_no
- ,nm.express_name
+ ,cp.express_name
+ ,cp.company_name
  ,nm.erp_order_id
  ,nm.order_no
  ,cp.actual_shipping_fee*cct.currency_transform as shipment_cost_usd
@@ -194,15 +264,125 @@ left join @mapping_erp_site_info s on nm.site_id = s.erp_site_id
 left join dwd_com_currency_transform cct
 on to_char(cp.logistics_delivery_time,'yyyymmdd')= cct.data_dt and upper(cp.cod_currency) = cct.currency_code and cct.pt = max_pt('dwd_com_currency_transform')
 ;
+--尾程成本 end
 
+-- 税金 start
+@tax_fee_info_pre:=
+select
+    bta.deliverytime
+   ,upper(bta.expressno) as expressno
+   ,bta.actualtaxfee
+   ,bta.company_name
+   ,bta.express_name
+   ,bta.tax_fee_input_time
+   ,case when bta.actualcurrency = 'RMB' then 'CNY' else bta.actualcurrency end as actualcurrency
+from
+(
+  select
+      bta.deliverytime
+     ,bta.expressno
+     ,bta.actualtaxfee
+     ,bta.actualcurrency
+     ,bta.express_name
+     ,bta.company_name
+     ,tax_fee_input_time
+     ,row_number() over (partition by bta.expressno,bta.express_name order by bta.levels asc) as rn
+  from
+  (
+    select
+      nvl(b.logistics_delivery_time,bta.deliverytime) as deliverytime
+     ,bta.expressno
+     ,b.name as express_name
+     ,c.name as company_name
+     ,bta.inputtime as tax_fee_input_time
+     ,sum(bta.actualtaxfee) as actualtaxfee
+     ,1 as levels
+     ,bta.actualcurrency
+    from ods_erp_erp_view_finance_codtaxfeebacktoarticle_full bta
+    left join
+    (
+      select b.express_no,b.logistics_delivery_time, row_number() over (partition by b.express_no  order by b.create_time  asc) as rn
+      from ods_erp_erp_finance_cod_shipment_back_to_article_full b where b.pt = '${date}'
+    ) b
+    on (upper(bta.expressno) = upper(b.express_no) and b.rn =1)
+    left join ods_erp_erp_logistics_express b
+    on (bta.expressid = b.id and b.pt = '${date}')
+    left join ods_erp_erp_logistics_company c
+    on (bta.companyid = c.id and c.pt = '${date}')
+    where bta.pt = '${date}' and to_char(bta.deliverytime,'yyyymmdd')>='20211001'
+    group by
+      nvl(b.logistics_delivery_time,bta.deliverytime)
+     ,bta.expressno
+     ,bta.actualcurrency
+     ,b.name
+     ,c.name
+     ,bta.inputtime
+    union all
+    select
+      nvl(b.logistics_delivery_time,bta.deliverytime) as deliverytime
+     ,bta.expressno
+     ,b.name as express_name
+     ,c.name as company_name
+     ,bta.inputtime as tax_fee_input_time
+     ,sum(bta.actualtaxfee) as actualtaxfee
+     ,2 as levels
+     ,bta.actualcurrency
+    from ods_erp_erp_popopie_view_finance_codtaxfeebacktoarticle_full bta
+    left join
+    (
+      select b.express_no,b.logistics_delivery_time, row_number() over (partition by b.express_no  order by b.create_time  asc) as rn
+      from ods_erp_erp_popopie_finance_cod_shipment_back_to_article_full b where b.pt = '${date}'
+    ) b
+    on (upper(bta.expressno) = upper(b.express_no) and b.rn =1)
+    left join ods_erp_erp_popopie_logistics_express b
+    on (bta.expressid = b.id and b.pt = '${date}')
+    left join ods_erp_erp_popopie_logistics_company c
+    on (bta.companyid = c.id and c.pt = '${date}')
+    where bta.pt = '${date}' and to_char(bta.deliverytime,'yyyymmdd')>='20211201'
+    group by
+      nvl(b.logistics_delivery_time,bta.deliverytime)
+     ,bta.expressno
+     ,bta.actualcurrency
+     ,bta.inputtime
+     ,b.name
+     ,c.name
+  ) bta
+) bta
+where bta.rn = 1
+;
+@tax_fees:=
+select
+  nvl(s.site_id,99999) as site_id
+ ,nvl(s.site_name,'others') as site_name
+ ,to_char(cp.deliverytime,'yyyymmdd') as data_dt
+ ,cp.expressno
+ ,cp.express_name
+ ,cp.company_name
+ ,nm.erp_order_id
+ ,nm.order_no
+ ,cp.actualtaxfee*cct.currency_transform as taxfee_usd
+ ,cp.actualtaxfee*cct.currency_transform_cny as taxfee_cny
+ ,to_char(cp.tax_fee_input_time,'yyyymmdd') as input_date
+ ,cp.actualcurrency
+ ,cp.actualtaxfee
+from @tax_fee_info_pre cp
+left join @order_delivery_info nm
+on (cp.expressno = nm.expressno)
+left join @mapping_erp_site_info s on nm.site_id = s.erp_site_id
+left join dwd_com_currency_transform cct
+on to_char(cp.deliverytime,'yyyymmdd')= cct.data_dt and upper(cp.actualcurrency) = cct.currency_code and cct.pt = max_pt('dwd_com_currency_transform')
+;
 
-@logistics_cost_detail_pre:=
+--税金 end
+
+@logistics_cost_detail:=
 select
   sc.site_id
  ,sc.site_name
  ,sc.data_dt
  ,sc.express_no
  ,sc.express_name
+ ,sc.company_name
  ,sc.order_no
  ,sc.erp_order_id
  ,nvl(sc.shipment_cost_cny,0) as shipment_cost_cny
@@ -210,6 +390,10 @@ select
  ,sc.input_date
  ,sc.cod_currency
  ,sc.actual_shipping_fee
+ ,'' as actualcurrency
+ ,0  as actualtaxfee
+ ,0  as actualtaxfee_usd
+ ,0  as actualtaxfee_cny
  ,'尾程' as fee_type
 from @shipment_cost sc
 union all
@@ -218,18 +402,62 @@ select
  ,sc.site_name
  ,sc.data_dt
  ,sc.expressno as express_no
+ ,sc.company_name
  ,sc.express_name
  ,sc.order_no
  ,sc.erp_order_id
  ,0 as shipment_cost_cny
  ,nvl(sc.head_cost_cny,0) as head_cost_cny
- ,'' as input_date
+ ,sc.input_date as input_date
  ,'' as cod_currency
  ,0 as actual_shipping_fee
+ ,'' as actualcurrency
+ ,0  as actualtaxfee
+ ,0  as actualtaxfee_usd
+ ,0  as actualtaxfee_cny
  ,'头程' as fee_type
 from @head_cost sc
+union all
+select
+  sc.site_id
+ ,sc.site_name
+ ,sc.data_dt
+ ,sc.expressno as express_no
+ ,sc.company_name
+ ,sc.express_name
+ ,sc.order_no
+ ,sc.erp_order_id
+ ,0 as shipment_cost_cny
+ ,0 as head_cost_cny
+ ,sc.input_date as input_date
+ ,'' as cod_currency
+ ,0 as actual_shipping_fee
+ ,sc.actualcurrency as actualcurrency
+ ,sc.actualtaxfee as actualtaxfee
+ ,sc.taxfee_usd as actualtaxfee_usd
+ ,sc.taxfee_cny as actualtaxfee_cny
+ ,'税金' as fee_type
+from @tax_fees sc
 ;
 
-select *
-from @logistics_cost_detail_pre a
-where a.data_dt between '20211101' and '20211131' and a.site_id in (18064,18170,18787,18995,19079,19081,19166,19172);
+insert overwrite table dwd_looklook_cod_report_head_tail_tax_cost_info partition (pt = '${date}')
+select
+  a.site_id as "ops站点ID"
+ ,a.site_name as "ops站点名称"
+ ,a.data_dt as "统计日期"
+ ,a.express_no as "物流单号"
+ ,a.express_name as "快递名称"
+ ,a.company_name as "物流公司"
+ ,a.order_no as "erp或者oms订单编号"
+ ,a.erp_order_id as "erp或者oms订单号"
+ ,a.input_date as "账单导入日期"
+ ,a.cod_currency as "尾程币种"
+ ,a.actual_shipping_fee as "尾程成本原币"
+ ,a.shipment_cost_cny as "尾程成本CNY"
+ ,a.head_cost_cny as "头程成本CNY"
+ ,a.actualcurrency as "税金币种"
+ ,a.actualtaxfee as "税金原币"
+ ,a.actualtaxfee_cny as "税金CNY"
+ ,a.fee_type as "费用类型"
+from @logistics_cost_detail a
+where a.data_dt>='20211001';

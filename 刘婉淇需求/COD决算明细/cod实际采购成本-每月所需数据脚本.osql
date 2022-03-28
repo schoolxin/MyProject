@@ -33,7 +33,7 @@ select
 from opdc.dwd_order_sales_process osp
 inner join (select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id) ooa
 on (osp.order_id = ooa.order_id)
-where to_char(osp.paytime,'yyyymm') = '202201' and lower(osp.pay_type) in ('货到付款','cod')
+where to_char(osp.paytime,'yyyymm') >= '202201' and lower(osp.pay_type) in ('货到付款','cod')
 group by osp.order_id,osp.order_no,osp.erp_order_id,osp.paytime,ooa.site_id
 union all
 select
@@ -41,12 +41,9 @@ select
 from popopiedc.dwd_order_sales_process osp
 inner join (select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id) ooa
 on (osp.order_id = ooa.order_id)
-where to_char(osp.paytime,'yyyymm') = '202201' and lower(osp.pay_type) in ('货到付款','cod')
+where to_char(osp.paytime,'yyyymm') >= '202201' and lower(osp.pay_type) in ('货到付款','cod')
 group by osp.order_id,osp.order_no,osp.erp_order_id,osp.paytime,ooa.site_id
 ;
-
-
-
 
 @site_delivery_info_oms:=
 select
@@ -67,6 +64,7 @@ on (lps.spuid = ds.pms_spu_id)
 where to_char(lps.deliverytime,'yyyymmdd')>='20211101'
 and lps.deliverystatus != '清关退回'
 and lps.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) -- 剔除掉网红手工订单
+and lps.order_id not in (select cast(id as string) from opdc.ods_oms_order_order where order_type = 1) -- 剔除网红订单
 group by
    lps.order_id
   ,lps.deliverytime
@@ -121,22 +119,25 @@ select
  ,dio.sku_count
  ,dio.purchase_price
  ,dio.skuid
+ ,dio.expressno
 from @order_info_oms oio
 left join @site_delivery_info_oms dio
 on (nvl(oio.order_id,oio.erp_order_id)=dio.order_id and oio.site_id = dio.siteid)
 ;
 
 
-
-create table tmp_logistics_purchase_detail202201
-as
+insert overwrite table dwd_looklook_cod_report_delivery_purchase_cost_info partition(pt = '${date}')
 select
-  nvl(esi.site_id,0) as site_id
- ,nvl(esi.site_name,'other') as site_name
- ,dio.order_no
- ,dio.paytime
- ,dio.deliverytime
- ,sum(dio.purchase_price*dio.sku_count) as purchase_cost_cny
+  nvl(esi.site_id,0) as "ops站点ID"
+ ,nvl(esi.site_name,'other') as "ops站点名称"
+ ,dio.order_no as "erp或者oms订单编号"
+ ,dio.paytime as "支付日期"
+ ,dio.deliverytime as "发货日期"
+ ,dio.skuid as "skuID"
+ ,dio.expressno as "物流单号"
+ ,dio.purchase_price as "采购价"
+ ,sum(dio.sku_count) as "发货数量"
+ ,sum(dio.purchase_price*dio.sku_count) as "采购成本"
 from @order_delivery_info_oms dio
 left join @mapping_erp_site_info esi
 on (dio.site_id = esi.erp_site_id)
@@ -147,4 +148,8 @@ group by
  ,dio.order_no
  ,dio.paytime
  ,dio.deliverytime
+ ,dio.skuid
+ ,dio.expressno
+ ,dio.purchase_price
 ;
+

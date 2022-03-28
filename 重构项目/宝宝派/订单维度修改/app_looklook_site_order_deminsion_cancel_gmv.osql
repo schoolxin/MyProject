@@ -35,6 +35,7 @@ from
          osp.addtime,osp.change_type,osp.paytime
   from opdc.dwd_order_sales_process osp
   where osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) -- 剔除网红手工订单
+  and osp.order_id not in (select cast(id as string) from opdc.ods_oms_order_order where order_type = 1) -- 剔除网红订单
   union all
   select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,
          osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
@@ -80,6 +81,7 @@ from
          osp.addtime,osp.change_type,osp.paytime
   from opdc.dwd_order_sales_process osp
   where osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) -- 剔除网红手工订单
+  and osp.order_id not in (select cast(id as string) from opdc.ods_oms_order_order where order_type = 1) -- 剔除网红订单
   union all
   select osp.order_no,osp.order_id,if(nvl(osp.pay_amt,0)=0,osp.order_amt,nvl(osp.pay_amt,0)) as order_amt,osp.sku_id,osp.spu_id,osp.spu_no,
          osp.good_price_currency,osp.sales_qty,osp.current_sku_qty,osp.currency_name,
@@ -333,6 +335,21 @@ on (a.site_id = b.id and b.pt='${date}')
 where a.pt='${date}'
 ;
 
+
+
+--select gpp.*,soi.site_name,cct.currency_transform_cny
+--from @goods_pre_price gpp
+--left join dwd_com_currency_transform cct
+--on (gpp.order_date = cct.data_dt and gpp.currency_name = cct.currency_code and cct.pt = '${date}')
+--inner join @mapping_erp_site_info esi
+--on (gpp.site_id = esi.erp_site_id)
+--left join dwd_com_site_org_info soi
+--on (soi.site_id = esi.site_id and soi.pt = '${date}')
+--where gpp.order_date = '20220320' and soi.business_unit_name = 'Victory项目部';
+--
+
+
+--
 insert overwrite table  app_looklook_site_order_deminsion_cancel_gmv partition(pt = '${date}')
 select
   gpp.order_date

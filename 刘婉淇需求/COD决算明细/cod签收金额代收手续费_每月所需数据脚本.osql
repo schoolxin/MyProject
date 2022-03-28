@@ -116,12 +116,6 @@ select
    lps.order_id
   ,lps.siteid
   ,upper(lps.expressno) as expressno
-  ,lps.codcurrencyprice
-  ,lps.expressid
-  ,lps.express_name
-  ,lps.deliverytime
-  ,lps.fristtime
-  ,lps.fristfee
 from opdc.dw_logistics_package_shipments lps
 where 1=1
 and lps.deliverystatus != '清关退回'
@@ -131,23 +125,11 @@ group by
    lps.order_id
   ,lps.siteid
   ,lps.expressno
-  ,lps.codcurrencyprice
-  ,lps.expressid
-  ,lps.express_name
-  ,lps.deliverytime
-  ,lps.fristtime
-  ,lps.fristfee
 union all
 select
    lps.order_id
   ,lps.siteid
   ,upper(lps.expressno) as expressno
-  ,lps.codcurrencyprice
-  ,lps.expressid
-  ,lps.express_name
-  ,lps.deliverytime
-  ,lps.fristtime
-  ,lps.fristfee
 from popopiedc.dw_logistics_package_shipments lps
 where 1=1
 and lps.deliverystatus != '清关退回'
@@ -157,24 +139,18 @@ group by
    lps.order_id
   ,lps.siteid
   ,lps.expressno
-  ,lps.codcurrencyprice
-  ,lps.expressid
-  ,lps.express_name
-  ,lps.deliverytime
-  ,lps.fristtime
-  ,lps.fristfee
 ;
 
 
 @order_delivery_info:=
 select
-  oio.order_no,oio.erp_order_id,oio.order_id,oio.site_id,dio.express_name,dio.expressno
+  oio.order_no,oio.erp_order_id,oio.order_id,oio.site_id,dio.expressno
 from @order_info_oms oio
 inner join @site_delivery_info_oms dio
 on (nvl(oio.order_id,oio.erp_order_id) = dio.order_id and oio.site_id = dio.siteid)
-group by oio.order_no,oio.erp_order_id,oio.order_id,oio.site_id,dio.express_name,dio.expressno
+group by oio.order_no,oio.erp_order_id,oio.order_id,oio.site_id,dio.expressno
 ;
--- 澳鹏
+-- 澳鹏 签收收入
 @site_sign_gmv_info:=
 select
    to.expressno
@@ -211,7 +187,7 @@ from
         on (a.expressid = b.id and b.pt = '${date}')
         left join ods_erp_erp_logistics_company c
         on (a.companyid = c.id and c.pt = '${date}')
-        where a.pt = '${date}' and to_char(a.signtime,'yyyymmdd')>='20220201'
+        where a.pt = '${date}' and to_char(a.signtime,'yyyymmdd')>='20220101'
         group by
            upper(a.expressno)
           ,to_char(a.signtime,'yyyymmdd')
@@ -235,7 +211,7 @@ from
         on (a.expressid = b.id and b.pt = '${date}')
         left join ods_erp_erp_popopie_logistics_company c
         on (a.companyid = c.id and c.pt = '${date}')
-        where a.pt = '${date}' and to_char(a.signtime,'yyyymmdd')>='20220201'
+        where a.pt = '${date}' and to_char(a.signtime,'yyyymmdd')>='20220101'
         group by
            upper(a.expressno)
           ,to_char(a.signtime,'yyyymmdd')
@@ -250,6 +226,7 @@ where to.rn = 1
 
 ;
 -- 签收收入和代收手续费 明细
+insert overwrite  table dwd_looklook_cod_report_sign_gmv_and_service_fee_info partition (pt = '${date}')
 select
   nvl(s.site_id,99999) as "ops站点ID"
  ,nvl(s.site_name,'others') as "ops站点名称"
@@ -259,16 +236,16 @@ select
  ,cp.company_name as "物流公司"
  ,nm.erp_order_id as "erp或者oms订单号"
  ,nm.order_no as "erp或者oms订单编号"
- ,cp.actualcodfee*cct.currency_transform as "签收金额(USD)"
- ,cp.actualcodfee*cct.currency_transform_cny as "签收金额(CNY)"
+ ,cp.actualcodfee*cct.currency_transform as "签收金额USD"
+ ,cp.actualcodfee*cct.currency_transform_cny as "签收金额CNY"
  ,cp.codback_gmv_input_time as "回款账单导入日期"
- ,cp.codcurrency as "签收金额(原币)"
- ,cp.actualcodfee as "签收金额币种"
- ,si.actualservicecharges as "手续费(原币)"
+ ,cp.codcurrency as "签收金额币种"
+ ,cp.actualcodfee as "签收金额原币"
+ ,si.actualservicecharges as "手续费原币"
  ,si.actualcurrency as "手续费币种"
  ,si.service_fee_input_time as "手续费导入日期"
- ,si.actualservicecharges*cct.currency_transform as "手续费(USD)"
- ,si.actualservicecharges*cct.currency_transform_cny as "手续费币种(CNY)"
+ ,si.actualservicecharges*cct.currency_transform as "手续费USD"
+ ,si.actualservicecharges*cct.currency_transform_cny as "手续费币种CNY"
 from @site_sign_gmv_info cp
 left join @order_delivery_info nm
 on (cp.expressno = nm.expressno)

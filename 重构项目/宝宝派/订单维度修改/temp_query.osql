@@ -1,14 +1,25 @@
-select * from opdc.dim_spu t where t.product_no in ('SP21111671G9','SP211116WSC0');
-
-select * from opdc.stock_rate tt where tt.product in ('SP21111671G9','SP211116WSC0','BF8CBE5FBE8F') and tt.pt<='${date}';
-
-
-select * from dwd_looklook_proudct_stock_devalue_info t where t.mt = '202201' and t.product_no = 'SP21111671G9';
-
-select * from dwd_looklook_product_purchase_cost_against t where t.mt <= '202201' and t.spu_no = 'SP21111671G9';
+select count(1) from dwd_mapping_erp_order_id a where a.pt = '${date}' and a.site_type = 'shopline';
+select * from dwd_mapping_erp_order_id a where a.pt = '${date}' and a.site_id = '19372';
 
 
-select * from static_choose_user_bu_mapping tt where tt.choose_user_name= '黄励锟' and tt.pt<='${date}';
+select * from dwd_mapping_erp_site_id t where t.pt <= '${date}' and t.site_id = '18914';
+select * from dwd_mapping_erp_site_id t where t.pt <= '${date}' and t.site_type = 'shopline';
 
 
-select * from opdc.ods_wms_wh_acc_warehouse_location_stock t where t.spu = 'BF8CBE5FBE8F';
+select
+   site_id
+  ,site_name
+  ,cast(erp_site_id as bigint) as erp_site_id
+  ,erp_site_name
+  ,max(erp_order_date) as erp_order_date
+  ,count(erp_order_id) as order_cnt
+  ,site_type
+from dwd_mapping_erp_order_id
+where pt<='20220325'
+and site_id = '18914'
+group by
+   site_id
+  ,site_name
+  ,erp_site_id
+  ,erp_site_name
+  ,site_type;

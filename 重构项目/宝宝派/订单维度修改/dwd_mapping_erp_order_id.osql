@@ -427,7 +427,49 @@ from
 ) tb
 where tb.rn = 1
 ;
-
+@shopline_mapping:=
+select
+   t.*
+  ,row_number() over (partition by t.site_order_id order by t.erp_order_id asc) as rn
+from
+(
+      select
+        tt.siteid as erp_site_id
+       ,tt.id as erp_order_id
+       ,ds.site_name as erp_site_name
+       ,so.site_name
+       ,so.site_id
+       ,so.id as site_order_id
+       ,tt.orderno
+       ,tt.addtime as erp_order_date
+       ,'erp' as data_source
+    from op_jxl.ods_erp_order_order tt
+    inner join opdc.dim_site ds
+    on (tt.siteid = ds.site_id and ds.site_type = 'shopline')
+    inner join dwd_looklook_shopline_order_info so
+    on (tt.siteorderidnav = so.id and so.pt = '${date}')
+    where nvl(tt.omsorderid,0) =0 and tt.orderno not like "CP%" and tt.id not in ('15146042','15193541')
+    union all
+    select
+        oo.site_id as erp_site_id
+       ,nvl(poo.id,oo.id) as erp_order_id
+       ,ds.site_name as erp_site_name
+       ,so.site_name
+       ,so.site_id
+       ,so.id as site_order_id
+       ,oo.order_no
+       ,oo.add_time as erp_order_date
+       ,'oms' as data_source
+    from opdc.ods_oms_order_order oo
+    inner join opdc.dim_site ds
+    on (oo.site_id = ds.site_id and ds.site_type = 'shopline')
+    left join op_jxl.ods_erp_order_order poo
+    on (oo.id = poo.omsorderid and oo.site_id = poo.siteid)
+    inner join dwd_looklook_shopline_order_info so
+    on (oo.site_order_no = so.order_id and so.pt = '${date}' and ds.ops_site_id = so.site_id)
+    where oo.is_delete = 0
+) t
+;
 
 insert overwrite table dwd_mapping_erp_order_id partition (pt='${date}')
 select
@@ -464,4 +506,18 @@ select
   ,null as erp_order_id_int
 from @erp_shop_mapping esm
 where to_char(esm.erp_order_date,'yyyymmdd')<'20211101'
+union all
+select
+  sm.erp_order_id
+ ,sm.site_order_id
+ ,sm.site_id
+ ,sm.site_name
+ ,sm.erp_site_id
+ ,sm.erp_site_name
+ ,sm.erp_order_date
+ ,'shopline' as  site_type
+ ,sm.data_source
+ ,null as erp_order_id_int
+from @shopline_mapping sm
+where sm.rn = 1
 ;

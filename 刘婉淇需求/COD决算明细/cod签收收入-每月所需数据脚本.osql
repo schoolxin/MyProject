@@ -52,21 +52,28 @@ select
   ,lps.siteid
   ,upper(lps.expressno) as expressno
   ,lps.codcurrencyprice
+  ,lps.express_name as company_name
+  ,lps.company_name as express_name
 from opdc.dw_logistics_package_shipments lps
 where 1=1
 and lps.deliverystatus != '清关退回'
 and lps.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) -- 剔除掉网红手工订单
+and lps.order_id not in (select cast(id as string) from opdc.ods_oms_order_order where order_type = 1)
 group by
    lps.order_id
   ,lps.siteid
   ,upper(lps.expressno)
   ,lps.codcurrencyprice
+  ,lps.express_name
+  ,lps.company_name
 union all
 select
    lps.order_id
   ,lps.siteid
   ,upper(lps.expressno) as expressno
   ,lps.codcurrencyprice
+  ,lps.express_name as company_name
+  ,lps.company_name as express_name
 from popopiedc.dw_logistics_package_shipments lps
 where 1=1
 and lps.deliverystatus != '清关退回'
@@ -77,6 +84,8 @@ group by
   ,lps.siteid
   ,upper(lps.expressno)
   ,lps.codcurrencyprice
+  ,lps.express_name
+  ,lps.company_name
 ;
 
 --select * from @site_delivery_info_oms  t where t.expressno = '33991454420';
@@ -99,7 +108,7 @@ from
        ,lpr.receipttime
        ,1 as levels
       from opdc.dw_logistics_package_received lpr
-      where to_char(lpr.receipttime,'yyyymm') in ('202110','202111','202112','202201','202202')
+      where to_char(lpr.receipttime,'yyyymm') >='202110'
       group by
         lpr.expressno
        ,lpr.receipttime
@@ -109,7 +118,7 @@ from
        ,lt.receipttime as receipttime
        ,2 as levels
       from ods_erp_erp_popopie_logistics_trace lt
-      where lt.pt = '${date}' and to_char(lt.receipttime,'yyyymm') in ('202110','202111','202112','202201','202202')
+      where lt.pt = '${date}' and to_char(lt.receipttime,'yyyymm') >='202110'
       group by
         lt.expressno
        ,lt.receipttime
@@ -118,18 +127,20 @@ from
 where t.rn =1
 ;
 
-create table tmp_receipt_data_10to2 as
+insert overwrite table dwd_looklook_cod_report_system_sign_gmv_info partition (pt= '${date}')
 select
-  nvl(esi.site_id,99999) as site_id
- ,nvl(esi.site_name,'others') as site_name
- ,oio.paytime
- ,oio.order_no
- ,oio.currency_name
- ,dio.codcurrencyprice
- ,rio.receipttime
- ,dio.expressno
- ,dio.codcurrencyprice*cct.currency_transform_cny as gmv_cny
- ,dio.codcurrencyprice*cct.currency_transform as gmv_usd
+  nvl(esi.site_id,99999) as "ops站点ID"
+ ,nvl(esi.site_name,'others') as "ops站点名称"
+ ,oio.paytime as "支付日期"
+ ,oio.order_no as  "erp或者oms订单编号"
+ ,oio.currency_name as "签收金额币种"
+ ,dio.codcurrencyprice as "签收金额原币"
+ ,rio.receipttime as "签收日期"
+ ,dio.expressno as "物流单号"
+ ,dio.express_name as "快递名称"
+ ,dio.company_name as "物流公司"
+ ,dio.codcurrencyprice*cct.currency_transform_cny as "签收金额CNY"
+ ,dio.codcurrencyprice*cct.currency_transform as "签收金额USD"
 from @order_info_oms oio
 inner join @site_delivery_info_oms dio
 on (nvl(oio.order_id,oio.erp_order_id) = dio.order_id and oio.site_id = dio.siteid)
