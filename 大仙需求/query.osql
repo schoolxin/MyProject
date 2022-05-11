@@ -1,0 +1,3 @@
+select * from dwd_looklook_cloud_order_info tt where tt.pt = '${date}' and nvl(tt.shipping_customer_phone,tt.default_customer_phone) in
+('966507222810','507222810')
+;

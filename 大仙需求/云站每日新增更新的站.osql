@@ -1,0 +1,68 @@
+--name:云站每日新增更新的站
+--author:OrderPlus
+--create time:2020-09-07 14:56
+--select * from ods_cloud_orderplus_db_tb_site_newup a where a.dt <='20200906';
+
+
+-- 9.6号新增和更新的站
+insert overwrite table ods_cloud_orderplus_db_tb_site_newup partition(dt = '${date}')
+select
+    id,
+    yn,
+    create_uid,
+    create_time,
+    update_uid,
+    update_time,
+    site_id,
+    skin,
+    name,
+    domain,
+    logo,
+    favicon,
+    paypal_client_id,
+    paypal_client_secret,
+    worldpay_username,
+    worldpay_password,
+    worldpay_merchant_code,
+    worldpay_installation_id STRING,
+    worldpay_mac,
+    ip_currency,
+    ga_key,
+    gtm_key,
+    fb_key,
+    social_instagram,
+    social_facebook,
+    social_pinterest,
+    social_youtube,
+    social_snapchat,
+    social_twitter,
+    cs_mail,
+    seo_title,
+    seo_keywords,
+    seo_description,
+    site_type,
+    bu_id,
+    parent_site_id,
+    parent_id
+from stg_cloud_orderplus_db_tb_site a
+where a.pt = '${date}' and to_char(a.update_time,'yyyymmdd')= '${date}'
+;
+
+
+--CREATE TABLE  stg_cloud_orderplus_db_tb_business_unit   (
+--     `id` bigint comment '主键',
+--     `yn` int comment '是否有效（1：是，0：否）',
+--     `create_uid` bigint comment '创建用户',
+--     `create_time` datetime comment '创建时间',
+--     `update_uid` bigint comment '更新用户',
+--     `update_time` datetime comment '更新时间',
+--     `name` string comment '事业部名称',
+--     `code` int comment '事业部编号'
+--)
+--COMMENT '事业部表'
+--PARTITIONED BY (dt STRING)
+--;
+
+--select * from stg_cloud_orderplus_db_tb_business_unit a where a.pt = '20200906';
+
+--drop table stg_cloud_orderplus_db_tb_business_unit;

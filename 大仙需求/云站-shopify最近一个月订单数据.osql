@@ -1,0 +1,81 @@
+--name:云站-shopify最近一个月订单数据
+--author:OrderPlus
+--create time:2020-07-11 14:01
+--select distinct a.financial_status from ods_looklook_mongodb_shopify_order a where a.pt= '${date}';
+--drop table tmp_shopify_order;
+--drop table tmp_order_info
+create table tmp_order_info_v1
+as
+select
+  to_char(a.created_at,'yyyymmdd') as date_dt,
+  string(a.id) as id,
+  'shopify' as site_type,
+  a.gateway,
+  a.financial_status,
+  b.message
+from ods_looklook_mongodb_shopify_order a
+left join (select b.order_id,b.message,row_number() over (partition by b.order_id order by b.created_at desc) as rn from ods_looklook_mongodb_shopify_transaction b where b.pt = '{date}') b
+on (a.id = b.order_id and rn = 1)
+where a.pt= '${date}' and to_char(a.created_at,'yyyymmdd') >='20200610'
+union all
+select
+  substring(replace(a.created_at,'-',''),1,8) as date_dt,
+  string(a.id) as id,
+  'shopify' as site_type,
+  a.gateway,
+  'unpaid' as financial_status,
+  '' as message
+from ods_looklook_mongodb_shopify_unpaid_order a
+left anti join ods_looklook_mongodb_shopify_order b
+on (a.id = b.checkout_id and lower(b.financial_status) in ('paid','partially_refunded','refunded') and b.pt='${date}')
+where a.pt= '${date}' and substring(replace(a.created_at,'-',''),1,8) >='20200610'
+union all
+select
+    to_char(a.create_time,'yyyymmdd') as date_dt,
+    string(a.id) as id,
+    'cloud' as site_type,
+    case
+        when a.pay_type in (1,2,3) then 'paypal'
+        when a.pay_type in (4) then 'oceanpay'
+        when a.pay_type in (5) then 'worldpay'
+        when a.pay_type in (10) then 'pacypay'
+        when a.pay_type = 13 then 'ingenico'
+        when a.pay_type = 9 then 'COD'
+        when a.pay_type = 14 then 'adyen'
+        when a.pay_type = 15 then 'checkout'
+        when a.pay_type = 16 then 'pingpong'
+    end as gateway,
+    a.payment_status,
+    b.err
+from orderplus_HK.ods_cloud_orderplus_db_tb_order a
+left join
+(
+  select b.order_id,b.err,row_number() over (partition by b.order_id order by b.create_time desc) as rn
+  from orderplus_HK.ods_cloud_orderplus_db_tb_order_payment b where b.pt = '${date}'
+) b
+on (a.id = b.order_id and b.rn =1)
+where a.pt = '${date}' and a.status not in (0,-1) and to_char(a.create_time,'yyyymmdd') >='20200610'
+union all
+select
+  distinct
+  to_char(a.order_date,'yyyymmdd') as date_dt,
+  a.order_id,
+  '独立站' as site_type,
+  a.pay_name as pay_type,
+  case when a.payment_date is null then 'unpaid' else 'paid' end as payment_status,
+  '' as err
+from dwd_looklook_spsite_order_info a
+where a.pt = '${date}' and to_char(a.order_date,'yyyymmdd') >='20200610'
+union all
+select
+  distinct
+  to_char(t.order_date,'yyyymmdd') as date_dt,
+  t.order_id,
+  'shoplazza' as site_type,
+  t.pay_type,
+  t.financial_status,
+  '' as err
+from dwd_looklook_shoplazza_order_info t
+where to_char(t.order_date,'yyyymmdd') >='20200610' and t.pt = '${date}'
+;
+

@@ -1,0 +1,76 @@
+--name:阶段销售数据分析
+--author:OrderPlus
+--create time:2020-06-24 13:44
+--@site_count_info:=
+--select aa.site_id,min(aa.data_dt) as first_date
+--from app_looklook_daily_market_cost aa
+--where aa.pt = '${date}' and aa.market_cost_cny>0
+--group by aa.site_id
+--;
+--@site_cnt:=
+--select
+--      substring(bb.first_date,1,6) as date_month,
+--      cc.business_unit_id,
+--      cc.business_unit_name,
+--      count(bb.site_id) as site_cnt
+--from @site_count_info bb
+--join dwd_com_site_org_info cc
+--on (bb.site_id = cc.site_id and cc.pt = '${date}')
+--group by cc.business_unit_name,cc.business_unit_id,substring(bb.first_date,1,6);
+--
+--
+--
+--@month_site_cnt:=
+--select
+--  a.date_month,
+--  a.business_unit_id,
+--  a.business_unit_name,
+--  sum(a.site_cnt) over (partition by a.business_unit_id order by a.date_month asc) as site_cnt
+--from @site_cnt a;
+
+
+@data1:=
+select
+  substring(a.data_dt,1,6) as date_month,
+  b.business_unit_name,
+  a.obj_name,
+  a.obj_id,
+  sum(a.sale_amount*a.currency_transform) as sale_amount_usd,
+  sum(a.sale_amount) as sale_amount_cny,
+  sum(a.market_cost_cny) as market_cost_cny
+from app_looklook_st_financial_summary  a
+join dwd_com_site_org_info b
+on (a.obj_id = b.site_id and b.pt = '${date}')
+where a.pt = '${date}' and a.data_dt between '20200101' and '20200631' and a.obj_type = 'site'
+group by b.business_unit_name,a.obj_name,substring(a.data_dt,1,6),a.obj_id;
+
+
+--select max(a.data_dt) from app_looklook_st_financial_summary a where a.data_dt between '20200101' and '20200631' and a.pt = '${date}' and a.obj_type = 'site';
+
+@data_ss:=
+select
+  a.date_month,
+  a.business_unit_name,
+  abs(a.sale_amount_usd) as sale_amount_usd,
+  case when abs(a.sale_amount_usd) >=0 and a.sale_amount_usd < 3000 then 'less3000'
+       when a.sale_amount_usd >=3000 and a.sale_amount_usd < 8000 then 'less8000'
+       when a.sale_amount_usd >=8000 and a.sale_amount_usd < 15000 then 'less15000'
+       when a.sale_amount_usd >=15000 and a.sale_amount_usd < 30000 then 'less30000'
+       when a.sale_amount_usd >=30000 then 'big30000'
+  end flag,
+  a.obj_id,
+  a.obj_name
+from @data1 a
+where a.market_cost_cny>0;
+
+--drop  table tmp_delivery_gmv;
+
+create table tmp_delivery_gmv as
+select
+  a.date_month,a.business_unit_name,a.flag,sum(a.sale_amount_usd) as sale_amount_usd,count(distinct a.obj_id) as site_cnt
+from @data_ss a
+group by a.date_month,a.business_unit_name,a.flag
+;
+
+
+

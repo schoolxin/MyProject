@@ -1,0 +1,130 @@
+--name:年度花费汇总-代理
+--author:OrderPlus
+--create time:2020-07-06 19:06
+-- 老adsgo
+--select * from stg_adsgo_adsgo_google_ad_accounts a where a.pt = '${date}' limit 10;
+--
+--select * from stg_adsgo_adsgo_facebook_ad_accounts a where a.pt = '${date}' limit 10;
+--
+--select * from stg_adsgo_adsgo_proxies a where a.pt = '${date}';
+
+
+-- 账号代理信息
+@adsgo_account_agent_info:=
+select  string(a.account_id) as account_id,b.name,0 as flag
+from (select a.account_id,a.proxy_id,row_number() over (partition by a.account_id order by a.proxy_id desc) as rn from stg_adsgo_adsgo_google_ad_accounts a where a.pt = '${date}') a
+left join stg_adsgo_adsgo_proxies b
+on (a.proxy_id = b.id and b.pt = '${date}')
+where a.rn =1
+union
+select  string(a.account_id) as account_id,b.name,0 as flag
+from (select a.account_id,a.proxy_id,row_number() over (partition by a.account_id order by a.proxy_id desc) as rn from stg_adsgo_adsgo_facebook_ad_accounts a where a.pt = '${date}') a
+left join stg_adsgo_adsgo_proxies b
+on (a.proxy_id = b.id and b.pt = '${date}')
+where a.rn =1
+;
+
+
+--select t.account_id,count(*) from @adsgo_account_agent_info t group by t.account_id having count(*)>1;
+
+-- 新 adsgo
+--
+--select count(*) from stg_adsgo_service_adsgo_service_bing_adaccounts a where a.pt = '${date}';
+--
+--select count(*) from stg_adsgo_service_adsgo_service_facebook_adaccounts a where a.pt = '${date}';
+--
+--select count(*) from stg_adsgo_service_adsgo_service_google_adaccounts a where a.pt = '${date}';
+--select count(*) from stg_adsgo_service_adsgo_service_snapchat_adaccounts a where a.pt = '${date}';
+--select count(*) from stg_adsgo_service_adsgo_service_tiktok_adaccounts a where a.pt = '${date}';
+--select count(*) from stg_adsgo_service_adsgo_service_pinterest_adaccounts a where a.pt = '${date}';
+--
+--select * from stg_adsgo_service_adsgo_service_agent a where a.pt = '${date}';
+@adsgo_service_account_agent_info:=
+select string(a.account_id) as account_id ,b.name,1 as flag
+from
+(
+  select a.account_id,a.proxy_id,row_number() over (partition by a.account_id order by a.proxy_id desc) as rn
+  from stg_adsgo_service_adsgo_service_bing_adaccounts a where a.pt = '${date}'
+ ) a
+left join stg_adsgo_service_adsgo_service_agent b
+on (a.proxy_id = b.id and b.pt = '${date}')
+where a.rn =1
+union
+select string(a.account_id) as account_id,b.name,1 as flag
+from
+(
+  select a.account_id,a.proxy_id,row_number() over (partition by a.account_id order by a.proxy_id desc) as rn
+  from stg_adsgo_service_adsgo_service_facebook_adaccounts a where a.pt = '${date}'
+ ) a
+left join stg_adsgo_service_adsgo_service_agent b
+on (a.proxy_id = b.id and b.pt = '${date}')
+where a.rn =1
+union
+select string(a.account_id) as account_id,b.name,1 as flag
+from
+(
+  select a.account_id,a.proxy_id,row_number() over (partition by a.account_id order by a.proxy_id desc) as rn
+  from stg_adsgo_service_adsgo_service_google_adaccounts a where a.pt = '${date}'
+ ) a
+left join stg_adsgo_service_adsgo_service_agent b
+on (a.proxy_id = b.id and b.pt = '${date}')
+where a.rn =1
+union
+select a.account_id,b.name,1 as flag
+from
+(
+  select a.account_id,a.proxy_id,row_number() over (partition by a.account_id order by a.proxy_id desc) as rn
+  from stg_adsgo_service_adsgo_service_snapchat_adaccounts a where a.pt = '${date}'
+ ) a
+left join stg_adsgo_service_adsgo_service_agent b
+on (a.proxy_id = b.id and b.pt = '${date}')
+where a.rn =1
+union
+select string(a.account_id) as account_id,b.name,1 as flag
+from
+(
+  select a.account_id,a.proxy_id,row_number() over (partition by a.account_id order by a.proxy_id desc) as rn
+  from stg_adsgo_service_adsgo_service_tiktok_adaccounts a where a.pt = '${date}'
+ ) a
+left join stg_adsgo_service_adsgo_service_agent b
+on (a.proxy_id = b.id and b.pt = '${date}')
+where a.rn =1
+union
+select string(a.account_id) as account_id,b.name,1 as flag
+from
+(
+  select a.account_id,a.proxy_id,row_number() over (partition by a.account_id order by a.proxy_id desc) as rn
+  from stg_adsgo_service_adsgo_service_pinterest_adaccounts a where a.pt = '${date}'
+ ) a
+left join stg_adsgo_service_adsgo_service_agent b
+on (a.proxy_id = b.id and b.pt = '${date}')
+where a.rn =1
+;
+@agen_info:=
+select tb2.account_id,tb2.name
+from
+(
+    select
+     tb1.account_id,tb1.name,row_number() over (partition by tb1.account_id order by tb1.flag desc) as rn
+    from
+    (
+      select * from @adsgo_account_agent_info a
+      union
+      select * from @adsgo_service_account_agent_info b
+    ) tb1
+) tb2
+where tb2.rn = 1
+;
+
+--select t.account_id,count(*) from @agen_info t group by t.account_id having count(*)>1;
+
+
+
+
+select substring(a.data_dt,1,4),nvl(b.name,'other') as agent,a.market_channel,sum(a.market_cost_cny) as market_cost_cny,sum(a.market_cost_cny*a.cny_usd_rate) as market_cost_usd
+from app_looklook_daily_market_cost a
+left join @agen_info b
+on (a.account_no = b.account_id)
+where a.pt= '${date}'
+group by substring(a.data_dt,1,4),nvl(b.name,'other'),a.market_channel
+;

@@ -1,0 +1,11 @@
+--name:2019黑五网一前后订单量
+--author:OrderPlus
+--create time:2020-11-24 18:31
+
+select count(distinct a.id) as order_cnt,to_char(a.order_date,'yyyymmdd')  as order_date
+from dwd_looklook_cloud_order_info a
+where a.pt= '${date}' and to_char(a.order_date,'yyyymmdd') between '20200301' and '20201123' group by to_char(a.order_date,'yyyymmdd');
+
+
+
+select count(1) from app_looklook_user_email_to_edm a where a.pt = '${date}'

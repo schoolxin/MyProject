@@ -1,0 +1,64 @@
+--name:测款商品
+--author:OrderPlus
+--create time:2020-06-16 15:26
+select * from ods_adsgo_adsgo_service_spu_promote_info a where a.pt= '20200615' and a.spu in ('SP0SZBRYG8J',
+'SP0SZBRYG8J',
+'SPIT0F6MCT6',
+'SPY5J1K0YUE',
+'SPO8NQNUE5S');
+--
+select count(distinct a.order_id) from dwd_looklook_allsitetype_order_product_info a
+where a.pt = '20200615' and substring(replace (a.order_date,'-',''),1,8) between '20200501' and '20200531';
+--substring(replace (a.order_date,'-',''),1,8) between '20200501' and '20200531';
+@test_data:=
+select
+  a.order_id,count(1) as cnt
+from dwd_looklook_allsitetype_order_product_info a
+inner join ods_adsgo_adsgo_service_spu_promote_info b
+on (a.product_spu = b.spu and b.pt = '20200615')
+where a.pt = '20200615' and substring(replace (a.order_date,'-',''),1,8) between '20200501' and '20200531'
+group by a.order_id;
+
+@datas:=
+select a.order_id,count(1) as cnt,b.cnt as compare_cnt
+from dwd_looklook_allsitetype_order_product_info a
+inner join @test_data b
+on (a.order_id = b.order_id)
+where a.pt = '20200615'
+group by a.order_id,b.cnt
+;
+
+--select a.order_id from @datas a where a.cnt = a.compare_cnt;
+
+
+
+
+
+@paid_order:=
+select
+    tb1.order_id,
+    tb1.site_id,
+    tb1.order_date
+from
+(
+    select
+        order_id,
+        site_id,
+        a.order_date
+    from dwd_looklook_allsitetype_order_info a
+    where pt='${date}'
+    and site_type in ('shopify','cloud','shoplazza') and lower(financial_status) in ('paid','partially_refunded','refunded')
+    union all
+    select
+        order_id,
+        string(site_id) as site_id,
+        to_char(a.order_date,'yyyymmdd') as order_date
+    from dwd_looklook_spsite_order_info a
+    where pt='${date}' and payment_date is not null
+
+) tb1
+group by tb1.order_id,tb1.site_id,tb1.order_date
+;
+
+
+select count(distinct order_id) from @paid_order a where order_date between '20200501' and '20200531' and a.order_id in (select a.order_id from @datas a where a.cnt = a.compare_cnt);

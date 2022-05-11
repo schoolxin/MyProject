@@ -1,0 +1,8 @@
+--name:营销花费问题查看
+--author:OrderPlus
+--create time:2020-06-02 11:07
+select a.*
+from app_looklook_daily_market_cost a
+left join dwd_com_site_org_info b
+on (a.site_id = b.site_id and b.pt ='${date}')
+where a.data_dt between '20200526' and '20200601' and a.pt = '${date}' and b.business_unit_name = '晟洲事业部';

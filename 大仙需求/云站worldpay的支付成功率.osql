@@ -1,0 +1,81 @@
+--name:云站worldpay的支付成功率
+--author:OrderPlus
+--create time:2020-06-04 11:11
+--select
+--  distinct
+--  a.pay_type,
+--  a.payment_status
+--from dwd_looklook_cloud_order_info a
+--where a.pt = '20200603' and to_char(order_date,'yyyymmdd')>='20200401' and a.pay_type = 5;
+
+
+
+--select
+--  to_char(a.create_time,'yyyymm') as date_month,
+--  count(a.id) as total_cnt,
+--  count(case when lower(a.payment_status) in ('paid','partially_refunded','refunded') then a.id end) as paid_cnt
+--from orderplus_HK.ods_cloud_orderplus_db_tb_order a
+--where a.pt = '20200603' and a.yn=1 and a.pay_type = 5 and to_char(a.create_time,'yyyymmdd')>='20200401'
+--group by to_char(a.create_time,'yyyymm');
+--
+
+
+select a.record_type,a.psp_reference,a.booking_date
+from ods_looklook_mongodb_adyen_transaction a
+where a.pt = '${date}' and a.record_type != 'Refused';
+
+
+select a.psp_reference
+from ods_looklook_mongodb_adyen_transaction a
+where a.pt = '${date}' and a.record_type in ('Refused','Received')
+group by a.psp_reference
+having count(*)>1;
+
+
+
+select record_type,count(1) as cnt
+from
+(
+    select a.record_type,row_number() over (partition by  a.psp_reference order by a.booking_date desc,a.record_type asc) as rn
+    from ods_looklook_mongodb_adyen_transaction a
+    inner join dwd_mapping_txn_order_site t2
+    on a.psp_reference=t2.txn_id and t2.pay_type='adyen' and t2.pt='${date}' and t2.site_type = '2'
+    where a.pt = '${date}' and  to_char(to_date(a.booking_date,'yyyy-mm-dd hh:mi:ss'),'yyyymmdd') between  '20200301' and '20200531'
+) tb1
+where tb1.rn = 1
+group by record_type
+;
+
+
+select status,count(1) as cnt,to_char(tb1.date_beijing,'yyyymm')
+from
+(
+    select a.status,row_number() over (partition by  a.transaction_code order by a.date_beijing desc,a.status asc) as rn,a.transaction_code,a.date_beijing
+    from ods_looklook_mongodb_worldpay_info a
+    inner join dwd_mapping_txn_order_site t2
+    on a.transaction_code=t2.txn_id and t2.pay_type='worldpay' and t2.pt='${date}' and t2.site_type = '2'
+    where a.pt = '${date}' and  to_char(a.date_beijing,'yyyymmdd') between  '20200101' and '20200601'
+) tb1
+where tb1.rn = 1
+group by status,to_char(tb1.date_beijing,'yyyymm')
+;
+
+
+
+--select op.status,count(op.trade_no) as cnt
+--from orderplus_HK.ods_cloud_orderplus_db_tb_order_payment op
+--where op.status !=0 and op.pt = '${date}' and to_char(op.create_time,'yyyymmdd') between  '20200521' and '20200604' and op.pay_type =5
+--group by op.status;
+
+select tb1.psp_reference
+from
+(
+    select a.psp_reference,row_number() over (partition by  a.psp_reference order by a.booking_date desc,a.record_type asc) as rn,record_type
+    from ods_looklook_mongodb_adyen_transaction a
+    inner join dwd_mapping_txn_order_site t2
+    on a.psp_reference=t2.txn_id and t2.pay_type='adyen' and t2.pt='${date}' and t2.site_type = '2'
+    where a.pt = '${date}' and  to_char(to_date(a.booking_date,'yyyy-mm-dd hh:mi:ss'),'yyyymmdd') between  '20200301' and '20200531'
+) tb1
+where tb1.rn = 1  and tb1.record_type = 'Received'
+
+;

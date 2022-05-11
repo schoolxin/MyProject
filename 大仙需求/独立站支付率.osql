@@ -1,0 +1,32 @@
+--name:独立站支付率
+--author:OrderPlus
+--create time:2020-05-29 19:09
+select
+    to_char(spoi.order_date,'yyyymm') as date_month,
+    count(distinct spoi.order_id) as total_cnt,
+    count(distinct case when spoi.payment_date is not null and spoi.pay_name = 'worldpay' then spoi.order_id end) as paid_cnt
+
+from dwd_looklook_spsite_order_info  spoi
+where spoi.pt='${date}' and spoi.site_name = 'berrylook' and to_char(spoi.order_date,'yyyymm') in ('202005','202004','202003')
+group by to_char(spoi.order_date,'yyyymm');
+
+
+
+
+
+select
+    *
+
+from dwd_looklook_spsite_order_info  spoi
+where spoi.pt='${date}' and spoi.site_name = 'luvyle' and to_char(spoi.order_date,'yyyymm') in ('202005') and spoi.order_id;
+
+
+
+
+select
+    to_char(cc.date_added,'yyyymm') as date_month,
+    count(distinct cc.order_id) as total_cnt,
+    count(distinct case when cc.order_status_id=5 then cc.order_id end) as paid_cnt
+from ods_opencar_oc_order cc
+where cc.pt= '20200528' and to_char(cc.date_added,'yyyymm') in ('202005','202004','202003') and cc.payment_method rlike 'Worldpay' and cc.p_site_name = 'luvyle'
+group by to_char(cc.date_added,'yyyymm');

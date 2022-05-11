@@ -1,0 +1,161 @@
+--name:云站top10和berrylook-worldpay支付情况分析
+--author:OrderPlus
+--create time:2020-07-14 09:37
+-- berrylook
+
+@tpu:=
+select
+  count(distinct a.order_id) as total_order,
+  count(distinct case when a.payment_date is not null then a.order_id end) as paid_order,
+  count(distinct case when a.payment_date is null then a.order_id end) as unpaid_order
+from dwd_looklook_spsite_order_info a
+where a.pt = '${date}' and lower(a.pay_name) rlike 'worldpay'
+and a.site_name = 'berrylook' and to_char(a.order_date,'yyyymmdd') between '20200613' and '20200713';
+
+
+
+
+@drop_order_pre:=
+select
+  *
+from dwd_looklook_spsite_order_info a
+where a.pt = '${date}' and lower(a.pay_name) rlike 'worldpay'
+and a.site_name = 'berrylook' and to_char(a.order_date,'yyyymmdd') between '20200613' and '20200713' and a.payment_date is null;
+
+
+@spsite_worldpay:=
+select distinct tt.transaction_code,regexp_extract(tt.transaction_code,'(.*?)_',1) as order_code,tt.refusal_reason,tt.status
+from ods_looklook_mongodb_worldpay_info tt where tt.pt = '${date}' and tt.transaction_code like 'E%';
+
+
+@drop_table:=
+select
+  count(distinct case when b.order_code is null then a.order_id end) as drop_order,
+  count(distinct case when b.refusal_reason = 'Do not honour' then a.order_id end) as do_Not_order,
+  count(distinct case when b.status = 'REFUSED' then a.order_id end) as REFUSED_order
+from @drop_order_pre a left join @spsite_worldpay b on (a.order_sn = b.order_code);
+
+
+
+
+
+
+--云站
+
+
+select
+  a.site_name,
+  count(distinct a.id) as total_order,
+  count(distinct case when lower(a.payment_status) in ('paid','partially_refunded','refunded') then a.id end ) as paid_order,
+  count(distinct case when lower(a.payment_status) not in ('paid','partially_refunded','refunded') then a.id end ) as unpaid_order,
+  count(distinct case when c.transaction_code is null then a.id end ) as drop_order,
+  count(distinct case when c.refusal_reason = 'Do not honour' and lower(a.payment_status) not in ('paid','partially_refunded','refunded') then a.id end ) as do_Not_order
+from dwd_looklook_cloud_order_info a
+left join orderplus_HK.ods_cloud_orderplus_db_tb_order_payment b
+on (a.id = b.order_id and b.pt = '${date}')
+left join ods_looklook_mongodb_worldpay_info c
+on (b.trade_no = c.transaction_code and c.pt = '${date}')
+where to_char(a.order_date,'yyyymmdd') between '20200612' and '20200712' and a.pay_type = '5' and a.pt = '${date}'
+and a.site_name in ('menily',
+'shoessee',
+'shiftmo',
+'chicsuper',
+'ininrubystudio',
+'holapick',
+'thebellerose',
+'heavyhot',
+'nikiluwa',
+'ninacloak')
+group by a.site_name;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+--- shopify
+
+
+
+@unpaid_order:=
+select
+      suo.id,
+      'drop_order' as financial_status
+from ods_looklook_mongodb_shopify_unpaid_order suo
+left anti join ods_looklook_mongodb_shopify_order mso
+on suo.id = mso.checkout_id and mso.pt='${date}'
+where suo.pt = '${date}' and suo.gateway is null and to_char(format_shopify_date(suo.created_at),'yyyymmdd') between '20200612' and '20200712'
+;
+
+select count(distinct a.id) from @unpaid_order a;
+
+@unpaid_order2:=
+select
+      suo.id,
+      'drop_order' as financial_status
+from ods_looklook_mongodb_shopify_unpaid_order suo
+left anti join ods_looklook_mongodb_shopify_order mso
+on suo.id = mso.checkout_id and mso.pt='${date}'
+where suo.pt = '${date}'  and to_char(format_shopify_date(suo.created_at),'yyyymmdd') between '20191201' and '20191231'
+;
+
+--select count(distinct a.id) from @unpaid_order a;
+
+@paid_order:=
+select
+      mso.id,
+      mso.financial_status
+from  ods_looklook_mongodb_shopify_order mso
+where mso.pt = '${date}' and mso.gateway = 'worldpay' and to_char(mso.created_at,'yyyymmdd') between '20200612' and '20200712'
+;
+select
+  count(distinct case when lower(a.financial_status) in ('paid','partially_refunded','refunded') then a.id end)  paid_cnt
+from @paid_order a;
+
+
+@paid_order2:=
+select
+      mso.id,
+      mso.financial_status
+from  ods_looklook_mongodb_shopify_order mso
+where mso.pt = '${date}'
+;
+
+@paid_failure_order:=
+select
+   tt.order_id,
+   tt.created_at,
+   tt.authorization,
+   tt.kind,
+   tt.message,
+   tt.status,
+   tt1.refusal_reason,
+   tt1.transaction_code
+from ods_looklook_mongodb_shopify_transaction tt
+left join ods_looklook_mongodb_worldpay_info tt1
+on (tt.authorization = tt1.transaction_code and tt1.pt = '${date}')
+where tt.pt = '${date}'
+and tt.order_id  not in (select a.id from @paid_order2 a where lower(a.financial_status) in ('paid','partially_refunded','refunded')  group by a.id)
+and tt.gateway = 'worldpay' and
+to_char(tt.created_at,'yyyymmdd') between '20191201' and '20191231';
+
+
+
+select count(distinct a.order_id) as unpaid_cnt,count(distinct case when nvl(a.message,a.refusal_reason) = 'Do not honour' then a.order_id end)
+from @paid_failure_order a;
+
+
+
+
+select *
+from ods_looklook_mongodb_shopify_unpaid_order a
+where to_char(a.created_at,'yyyymmdd') between '20200612' and '20200712' and a.gateway is null and a.pt = '${date}';

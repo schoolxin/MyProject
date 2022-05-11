@@ -1,0 +1,66 @@
+--name:SPU级别的ROI
+--author:OrderPlus
+--create time:2020-05-18 09:42
+@facebook_spu_insight:=
+select *
+from ods_adsgo_adsgo_service_facebook_spu_insight c
+where c.pt = '${date}';
+
+--select * from @facebook_spu_insight a where a.spu = '372AF1DDD093';
+
+@facebook_spu_insight_spu:=
+select a.site_id,a.spu,replace(a.reported_date,'-','') as reported_date,a.spent/100 as spent,a.income/100 income
+from @facebook_spu_insight a
+where length(trim(a.spu))>0
+union all
+select a.site_id,a.spu,replace(a.reported_date,'-','') as reported_date,a.spent/100 as spent,a.income/100 income
+from @facebook_spu_insight a
+left join (select distinct b.handle,b.spu from dwd_mapping_shopify_product_spu b where b.pt= '${date}' and length(trim(b.spu))>0) b
+on (a.origin_identity = b.handle)
+where length(trim(a.spu))<=0
+;
+--select * from @facebook_spu_insight_spu c where c.spu = '372AF1DDD093';
+
+@facebook_spu_insight_spu_s:=
+select
+  a.reported_date,a.spu,a.site_id,sum(a.income) as income,sum(a.spent) as spent
+from @facebook_spu_insight_spu a
+group by a.site_id,a.spu,a.reported_date
+;
+
+select
+  a.reported_date,
+  b.business_name,
+  a.spu,
+  sum(a.income) as income,
+  sum(a.spent) as spent,
+  case when sum(a.spent) = 0 then sum(a.income) else sum(a.income)/sum(a.spent) end as ROI
+from @facebook_spu_insight_spu_s a
+inner join ods_adsgo_adsgo_service_website b
+on (a.site_id = b.id and b.pt = '${date}')
+where length(trim(a.spu))>0
+group by b.business_name,a.spu,a.reported_date
+;
+
+
+--select * from dwd_mapping_shopify_product_spu  cc where cc.pt = '20200517' and cc.handle = 'sexy-sparkling-sling-strapless-tassel-dress';
+
+
+
+
+
+
+--
+--select
+--  a.*,
+--  b.opstore_id,
+--  b.site_id,
+--  b.domain
+--from ods_adsgo_adsgo_service_facebook_spu_insight a
+--left join ods_adsgo_adsgo_service_website b
+--on (a.site_id = b.id and b.pt = '${date}')
+--where a.pt = '${date}' and a.spu = '05A862B2887E'
+-- ;
+
+
+--select * from ods_adsgo_adsgo_service_facebook_spu_insight_day c where c.pt = '${date}' and c.spu = '05A862B2887E' and c.site_id = '16777215';

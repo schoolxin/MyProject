@@ -1,0 +1,38 @@
+--name:berrylook拒付
+--author:OrderPlus
+--create time:2020-07-13 10:53
+
+@worldpay_order :=
+select
+    tx.txn_id as txn_id,
+    soi.order_id
+from
+(
+  select *
+  from dwd_looklook_spsite_order_info soi
+  where soi.pt='${date}' and soi.txn_id rlike 'E1841159_0.42040500'
+--  and soi.site_name = 'berrylook'
+--  and to_char(soi.order_date,'yyyymmdd') between '20200501' and '20200531'
+) soi
+lateral view explode(split(txn_id,',')) tx as txn_id
+
+;
+
+@datas1:=
+select
+   t1.order_id,
+   t2.transaction_code,
+   t2.status,
+   t2.refusal_reason,
+   row_number() over (partition by t1.order_id order by nvl(t2.date_beijing,getdate()) desc,nvl(t2.status,'Z') asc) as rn
+from @worldpay_order t1
+left join ods_looklook_mongodb_worldpay_info t2
+on (t1.txn_id = t2.transaction_code and t2.pt = '${date}')
+where t1.txn_id = 'E1841159_0.42040500'
+;
+--SENT_FOR_AUTHORISATION,ERROR,EXPIRED,REFUSED,SOFT_DECLINED,CAPTURE_FAILED,CANCELLED
+select
+  *
+from @datas1 t
+--where t.status is  null
+;

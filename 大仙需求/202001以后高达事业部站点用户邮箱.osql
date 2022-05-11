@@ -1,0 +1,17 @@
+--name:202001以后高达事业部站点用户邮箱
+--author:OrderPlus
+--create time:2021-03-18 11:51
+@site_info:=
+select a.business_unit_name,a.site_id,a.site_name
+from dwd_com_site_org_info a where a.pt >='20190101' and a.business_unit_name  rlike '高达' group by a.business_unit_name,a.site_id,a.site_name;
+
+create table tmp_gdsyb_user_email
+as
+select if(length(trim(a.shipping_customer_email))=0,a.default_customer_email,shipping_customer_email) as email,b.site_name,b.business_unit_name,a.site_type
+from dwd_looklook_allsitetype_order_info a
+inner join @site_info b
+on (a.site_id = b.site_id)
+where a.pt = '${date}' and (length(trim(a.shipping_customer_email))+length(trim(a.default_customer_email)))>0 and a.order_date>='20200101'
+;
+
+

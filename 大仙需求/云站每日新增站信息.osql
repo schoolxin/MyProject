@@ -1,0 +1,106 @@
+--name:原站每日新增站信息
+--author:OrderPlus
+--create time:2020-09-07 14:59
+-- 区分父 子站
+
+-- 将9.6号之前的站点信息 按create_time 进行初始化到目标表,以后每天 目标表只插入最新的数据  为了后续 补数据 考虑 临时把stg_cloud_orderplus_db_tb_site表的生命周期调大
+--alter table stg_cloud_orderplus_db_tb_site set lifecycle 36500;
+
+-- stg_cloud_orderplus_db_tb_site 表是每日全量
+-- ods_cloud_orderplus_db_tb_site_newup 表是每日新增和变化的数据
+
+
+
+
+-- 新增或被更新的站 跟之前站的parent_id进行比较 如果是更新过了 则用update_time 作为当日新增的日期  如果是create_time是当日的 则直接加入目标表
+
+
+
+--- 每日新增站 或者变更过父子站关系的站
+
+--新增的父站或者子站
+
+@new:=
+select
+  a.site_id,
+  a.name as site_name,
+  to_char(a.create_time,'yyyymmdd') as create_date,
+  a.domain,
+  a.bu_id,
+  '' as bu_name,
+  if(a.parent_id==0,1,0) as is_parent,
+  a.parent_id
+from ods_cloud_orderplus_db_tb_site_newup a
+where a.dt = '${date}' and to_char(a.create_time,'yyyymmdd') = '${date}'
+;
+
+--每日变更的子站或父站
+@update:=
+select
+  distinct
+  a.site_id,
+  a.name as site_name,
+  to_char(a.update_time,'yyyymmdd') as create_date,
+  a.domain,
+  a.bu_id,
+  '' as bu_name,
+  if(a.parent_id==0,1,0) as is_parent,
+  a.parent_id
+from ods_cloud_orderplus_db_tb_site_newup a
+inner join
+(
+  select b.id,b.parent_id,row_number() over (partition by b.id order by b.update_time desc) as rn
+  from stg_cloud_orderplus_db_tb_site b
+  where b.pt > to_char(dateadd(to_date('${date}','yyyymmdd'),-5,'dd'),'yyyymmdd') and to_char(b.update_time,'yyyymmdd') != '${date}'
+
+) b
+on (a.id = b.id and a.parent_id != b.parent_id and b.rn =1)
+where a.dt = '${date}'
+;
+
+insert overwrite table app_looklook_daily_cloud_new_site_info partition (pt = '${date}')
+select
+  a.site_id,
+  a.site_name,
+  a.create_date,
+  a.domain,
+  a.bu_id,
+  soi.business_unit_name as bu_name,
+  a.is_parent,
+  a.parent_id
+from app_looklook_daily_cloud_new_site_info a
+left join looklook.ods_looklook_looklook_tb_cloudsite_attribute tca
+on a.site_id=tca.site_id and tca.pt=max_pt('looklook.ods_looklook_looklook_tb_cloudsite_attribute')
+left join looklook.dwd_com_site_org_info soi
+on tca.id=soi.site_mapping_id and soi.site_type_id in (2,4) and soi.origin_domain rlike 'chimpone' and soi.pt=max_pt('looklook.dwd_com_site_org_info')
+where a.pt = max_pt('app_looklook_daily_cloud_new_site_info')
+union all
+select
+  a.site_id,
+  a.site_name,
+  a.create_date,
+  a.domain,
+  string(a.bu_id) as bu_id,
+  soi.business_unit_name as bu_name,
+  string(a.is_parent) as is_parent,
+  bigint(a.parent_id) as parent_id
+from @new a
+left join looklook.ods_looklook_looklook_tb_cloudsite_attribute tca
+on a.site_id=tca.site_id and tca.pt=max_pt('looklook.ods_looklook_looklook_tb_cloudsite_attribute')
+left join looklook.dwd_com_site_org_info soi
+on tca.id=soi.site_mapping_id and soi.site_type_id in (2,4) and soi.origin_domain rlike 'chimpone' and soi.pt=max_pt('looklook.dwd_com_site_org_info')
+union all
+select
+  a.site_id,
+  a.site_name,
+  a.create_date,
+  a.domain,
+  string(a.bu_id) as bu_id,
+  soi.business_unit_name as bu_name,
+  string(a.is_parent) as is_parent,
+  bigint(a.parent_id) as parent_id
+from @update a
+left join looklook.ods_looklook_looklook_tb_cloudsite_attribute tca
+on a.site_id=tca.site_id and tca.pt=max_pt('looklook.ods_looklook_looklook_tb_cloudsite_attribute')
+left join looklook.dwd_com_site_org_info soi
+on tca.id=soi.site_mapping_id and soi.site_type_id in (2,4) and soi.origin_domain rlike 'chimpone' and soi.pt=max_pt('looklook.dwd_com_site_org_info');
