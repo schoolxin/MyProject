@@ -1,0 +1,459 @@
+-- ????
+@site_receipt_info_oms:=
+select
+    upper(t.expressno) as expressno
+   ,t.receipttime
+from
+(
+    select
+      t.expressno
+     ,t.receipttime
+     ,row_number() over (partition by t.expressno,t.receipttime order by t.levels asc) as rn
+    from
+    (
+      select
+        lpr.expressno
+       ,lpr.receipttime
+       ,1 as levels
+      from opdc.dw_logistics_package_received lpr
+      where to_char(lpr.receipttime,'yyyymm') >='202110'
+      group by
+        lpr.expressno
+       ,lpr.receipttime
+      union all
+      select
+        lt.expressno
+       ,lt.receipttime as receipttime
+       ,2 as levels
+      from ods_erp_erp_popopie_logistics_trace lt
+      where lt.pt = max_pt('ods_erp_erp_popopie_logistics_trace') and to_char(lt.receipttime,'yyyymm') >='202110'
+      group by
+        lt.expressno
+       ,lt.receipttime
+    ) t
+) t
+where t.rn =1
+;
+
+@site_delivery_info_oms:=
+select
+   lps.order_id
+  ,lps.expressno
+from opdc.dw_logistics_package_shipments lps
+where 1=1
+group by
+    lps.order_id
+   ,lps.expressno
+union all
+select
+   lps.order_id
+  ,lps.expressno as expressno
+from popopiedc.dw_logistics_package_shipments lps
+where 1=1
+group by
+    lps.order_id
+   ,lps.expressno
+;
+@delivery_receipt_info:=
+select
+  t.order_id
+ ,concat_ws("|",collect_set(t.expressno)) as expressno
+ ,concat_ws("|",collect_set(nvl(to_char(t.receipttime,'yyyymmdd'),'-'))) as receipttime
+from
+(
+    select
+    a.order_id,
+    a.expressno,
+    b.receipttime
+  from @site_delivery_info_oms a
+  left join @site_receipt_info_oms b
+  on (a.expressno = b.expressno)
+) t
+group by t.order_id
+
+;
+
+
+@order_info:=
+select
+  t.consignee
+-- ,concat_ws("|",collect_set(t.consignee)) as consignee
+-- ,concat_ws("|",collect_set(t.address)) as address
+ ,concat_ws("|",collect_set(t.order_id)) as order_id
+ ,concat_ws("|",collect_set(t.order_no)) as order_no
+ ,concat_ws("|",collect_set(t.pay_type)) as pay_type
+ ,concat_ws("|",collect_set(string(trunc(t.pay_amt)))) as pay_amts
+ ,trunc(t.pay_amt) as pay_amt
+ ,concat(t.consignee,'-',trunc(t.pay_amt)) as wheres
+ ,concat_ws("|",collect_set(t.expressno)) as expressno
+ ,concat_ws("|",collect_set(t.receipttime)) as receipttime
+from
+(
+    select distinct a.consignee,a.tel,a.address,b.order_id,b.order_no,b.pay_type,b.pay_amt,c.expressno,c.receipttime
+    from opdc.dw_order_address a
+    left join opdc.dwd_order_sales_process b
+    on (a.order_id = b.erp_order_id)
+    left join @delivery_receipt_info c
+    on (b.order_id = c.order_id)
+    where to_char(a.create_date,'yyyymmdd') >= '20210101' and a.sys_source = 'erp'
+    union
+    select distinct a.consignee,a.tel,a.address,b.order_id,b.order_no,b.pay_type,b.pay_amt,c.expressno,c.receipttime
+    from opdc.dw_order_address a
+    left join opdc.dwd_order_sales_process b
+    on (a.order_id = b.order_id)
+    left join @delivery_receipt_info c
+    on (b.order_id = c.order_id)
+    where to_char(a.create_date,'yyyymmdd') >= '20210101' and a.sys_source != 'erp'
+    union all
+    select distinct a.consignee,a.tel,a.address,b.order_id,b.order_no,b.pay_type,b.pay_amt,c.expressno,c.receipttime
+    from popopiedc.dw_order_address a
+    left join popopiedc.dwd_order_sales_process b
+    on (a.order_id = b.erp_order_id)
+    left join @delivery_receipt_info c
+    on (b.order_id = c.order_id)
+    where to_char(a.create_date,'yyyymmdd') >= '20210101' and a.sys_source = 'erp'
+    union
+    select distinct a.consignee,a.tel,a.address,b.order_id,b.order_no,b.pay_type,b.pay_amt,c.expressno,c.receipttime
+    from popopiedc.dw_order_address a
+    left join popopiedc.dwd_order_sales_process b
+    on (a.order_id = b.order_id)
+    left join @delivery_receipt_info c
+    on (b.order_id = c.order_id)
+    where to_char(a.create_date,'yyyymmdd') >= '20210101' and a.sys_source != 'erp'
+) t
+group by t.consignee,trunc(t.pay_amt)
+;
+
+select
+*
+from @order_info a
+where a.consignee in ('Ahmed yousry',
+'Salim jawed',
+'TAUQEER AHMAD AKHOON',
+'YAHYA AL MOURABET',
+'wasim Mohammad',
+'Jarallah Hayash ',
+'shakeel',
+'Babu Bashir',
+'shraban kumar',
+'Ahmed youssef',
+'Rishi Gurung',
+'Al majar ',
+'hitham mostafa',
+'Hamdilah',
+'Fatuma Aliyi',
+'RUBEL RANA',
+'Qurtubha',
+'Mahalakshm',
+'Faisal Ali Muhammad Yahya',
+'Muhammad Masood Alam ',
+'Hassan Jaber',
+'Farman',
+'Nuha alkhatib',
+'Qaiser Ali',
+'Gary Adesna',
+'hitham mostafa',
+'Hamdilah',
+'Fatuma Aliyi',
+'RUBEL RANA',
+'Qurtubha',
+'Mahalakshm',
+'Faisal Ali Muhammad Yahya',
+'Muhammad Masood Alam ',
+'Hassan Jaber',
+'Farman',
+'Nuha alkhatib',
+'Qaiser Ali',
+'Gary Adesna',
+'Khubaib Sohail',
+'Mehedi hasan',
+'Sumair Ahmed',
+'Mahmoud Orsan Abu Sara',
+'Ahmed Al-Quraini ',
+'Youssef Alsakka',
+'Mohamed salah',
+'Bader',
+'Munawar Mohamed',
+'Vasil',
+'Ronald kagimu',
+'Shamima ',
+'alfred c baldovino',
+'Ejajul hoque',
+'husein Abdulwahab',
+'Mohamed mmdo',
+'Mohammad Shams',
+'Mariam',
+'Mohamed',
+'Ahmed Reda Elmogy',
+'Bobby Carreon Bayot',
+ 'Mohammed',
+'Name Mohammed Salih Abdallah.',
+'????? ??????',
+'Nagendra thapa magar',
+ 'aisal Maqsood',
+'Mohamed Elsawy ',
+'abdeen rakab',
+'mohan sunar',
+'Al-Khatib Jaber',
+'Waleed ragab mahmoud',
+'ALY HASABALLA ALY ',
+'?????????????',
+'Mohammad Zyoud',
+'Brian Mutisya',
+'khaizer lopez',
+'Sherif Said Ali',
+'Mohamed Mansour',
+'Daniel muraba',
+'Ahmed Omar Mohamed',
+'Hossam',
+'Mohammad Ismail Fateh',
+'leez elzabeth',
+'Mohammad Jolil Khan J K',
+'Omar Elzubair ',
+'bandar bajsair',
+'??????',
+'???? ???? ?????',
+'Shoaib_Ahmed',
+'esmail esrawi',
+'syed zulqurnain',
+'Abdul RazAk Alungal',
+'Rubab Khalid',
+'???? ???? ???????',
+'ERWIN DELA ROSA ',
+'Hafezu Rahaman ',
+'???? ???? ????',
+'Hamid',
+'???? ????? ????',
+'Jamal',
+'???? ???? ????',
+'???? ??????',
+'JAMSHEER ',
+'Umair',
+'HASSAN mostafa',
+'Efa',
+'BAINGAN AKMAD UTTO',
+'Mohamed hassan khamis',
+'Ali Hajj Ali Ahmed',
+'??? ??????',
+'Sameh Kemo',
+'????',
+'???????',
+'????? ????',
+ 'nhor ',
+'wesam moustafa bakr',
+'?????',
+'Naveed Ahmed',
+'???? ??? ?????? ????? ??????',
+'???? ??????',
+'Mohamed Ahmed Aref',
+'Islam',
+'Ashraf aljede',
+'???? ???????',
+'Mishial Abdallaah',
+'???? ??????? ????',
+'Abdur Rahman ',
+'Adnan Al-Harbi',
+'Ahmed lsmail ',
+ 'Naveed Sharif ',
+'JOJO BANTUG',
+'Sabuj Sarker ',
+'Mahmoud Abu Ras',
+'????',
+'Rakib sikder',
+'????',
+'???? ????????',
+'Amir Uddin',
+ '???? ??? ?????',
+'????  ',
+'Hirday Yadav',
+'mujahed',
+'joseph bayonito',
+'Elnaeem mohammed Babiker',
+'shadi Mohamed ',
+'????? ????',
+'Naser kedir',
+'Khaled',
+'Ahmed Mohamed',
+'???? ????',
+'Mohammed. Omer',
+'Noman Sattar',
+'MUHAMMAD JAVED ASHRAF',
+'Ali Al-Amari',
+'???? ???????',
+'Ileve in jumom',
+'AMR muhammad',
+'Alauddin ',
+'Abdul Rahman',
+'Aeregahagn  JemaL',
+'Mohammed',
+'???? ????? ?????',
+'Muhamed  Ahmad ',
+'???? ??? ????? ?????',
+'Rakib',
+'Daniel Cornelio',
+'md delowar hossain',
+'Amgd jabbary ',
+'????',
+'abdul wahab.',
+'Saleh Ahmed',
+'???',
+'Mohd iqram',
+'????',
+'Parvej Ali',
+'Ahmed',
+'Mariam',
+'????? ????',
+'Yasser Ghania ',
+'Ahmed Mohamed',
+'Taushif ahmad farooqui ',
+'Kristy',
+'Busuri Mohamed Hag',
+'Jemall',
+'Shahrukh khan',
+'Md basir',
+'Mahmoud Ezzat',
+'??? ???? ',
+'Mohamad trad ',
+'Abdulkarim',
+'Mohammad ABURAYYAN ',
+'??????',
+'Naveed noor',
+'Mohamed Sohaib',
+'Poncito Carlos Alversado',
+'Rabindra CHAUDHARY',
+'Raafat zohdy',
+'??? ???????',
+'??????? ?????',
+'??? ????',
+'Haitham ElDai',
+'Emad alazeh',
+'Shafiq ',
+'Mohammed ALHASSAN Algsily',
+'????? ??? ?????? ???????',
+'Osama bakr',
+'??? ??????? ??? ???????',
+'Azim uddin',
+'???? ?????',
+'Abdelaziz ',
+ 'Esam matar ',
+'????? ? ??????',
+'??? ???? ?????? ',
+'Ramiz qazha',
+'Robert Degolacion',
+'????? ???? ???? ???????',
+'???? ?? ???? ??',
+'???? ??????',
+'????? ?? ???',
+'??? ??????? ',
+'AMR ZAYAT ',
+'??? ?????? ???????',
+'Imran',
+'Ehab ghanem',
+'Mahmoud Kawam',
+'Yasir Afsir',
+'Atef Babeker Abdulgader',
+'???????? ??? ??? ',
+'Mohamed Nazaar ',
+'Safdar ',
+'?? ???????? ????',
+'??????? ???? ????? ?????',
+'Yasir',
+'Mohammed agamey',
+'???? ????',
+'Asma hattab',
+'???? ???? ??? ?????? ????',
+'Usman hayat',
+'Mohammed',
+'Fawzi  Nahdi',
+'Mohammed sami',
+'????? ?????????',
+'Awol muhammed ',
+'??? ?????? ?????',
+'????? ????',
+'???? ???? ???',
+'??? ???? ????',
+'Aamir Aftab ',
+'???? ?????',
+'Mohamed Shalaby',
+'???? ????????? ???? ???',
+'Mohamed Kamal Yousef ',
+'???? ?????',
+'???? ???? ????',
+'Mohamed elsherbiny',
+'Shanto miazi',
+'Gerald pedrozo',
+'???? ????',
+'???? ??? ????? ??? ??????',
+'Sikandar Ali',
+'Shaik sarwar',
+'FLORO M TANEO',
+'Izzat Mohammed Abu Al-Fatah',
+'Atif',
+'??? ?????? ?????',
+'????? ???',
+'???? ????',
+'Mohd ASHAD',
+'Usman Saghir',
+'??? ???? ???? ????????',
+'???? ?????',
+ 'Moustafa ELSAYED',
+'Raveendra.',
+'Basant kumar',
+'Ahmed elmasry',
+'BONIFACIO JR. DELA CRUZ',
+'Arif',
+'?????? ???????',
+'Khaled Azmy',
+'Mai Bab Ahmed Qassem',
+'Mohammed masum',
+'Qaisar',
+'Adel Fathi',
+'???? ??????',
+'Hemida Ghanem',
+'Muhammad Al-Zuhairi',
+'Rosie',
+'Ahmed Mohammed',
+ 'Ibrahim Hassan Mahmoud',
+'ZAKIR HABIB',
+'Khaled Issa Mohamed Al-Tayeb',
+'Nozrul islam',
+'Cornelius Okudzeto ',
+'Abdulla',
+'Syed',
+'Abdulla',
+'Ali Moustafa',
+'Rajab',
+'Ben Abdullah Zouhair',
+'Nadeem Bashir',
+'???? ??? ???????  ??',
+'sudai Arebi',
+'Sarah',
+'Khalid bakheet',
+'farman ali ',
+'Xalhaa ibn Jemaal',
+'samir bouazdayne',
+'Math',
+'???? ????',
+'Malik',
+'????',
+ 'Mohamed',
+'Jamel yaassin',
+'Izz al-Din',
+'Naseem Bin Yahya',
+'Arshid',
+'Ali Hassan',
+'Mourad',
+'Salah Ahmed Zaki',
+'Junaid',
+'Ahmad Al titi',
+'Hamoud Mohammad Ahmed Dumayni',
+'Name,Sohag Hossain ',
+'Minhajur Rahman',
+'Abu Salman abu',
+'Nafs Arqam',
+'Gabriel Adam',
+'Osman',
+'Jamal Abdul Sattar',
+'Sule Abubakari'
+
+);

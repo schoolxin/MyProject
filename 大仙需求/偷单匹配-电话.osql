@@ -1,0 +1,132 @@
+-- 签收数据
+@site_receipt_info_oms:=
+select
+    upper(t.expressno) as expressno
+   ,t.receipttime
+from
+(
+    select
+      t.expressno
+     ,t.receipttime
+     ,row_number() over (partition by t.expressno,t.receipttime order by t.levels asc) as rn
+    from
+    (
+      select
+        lpr.expressno
+       ,lpr.receipttime
+       ,1 as levels
+      from opdc.dw_logistics_package_received lpr
+      where to_char(lpr.receipttime,'yyyymm') >='202110'
+      group by
+        lpr.expressno
+       ,lpr.receipttime
+      union all
+      select
+        lt.expressno
+       ,lt.receipttime as receipttime
+       ,2 as levels
+      from ods_erp_erp_popopie_logistics_trace lt
+      where lt.pt = max_pt('ods_erp_erp_popopie_logistics_trace') and to_char(lt.receipttime,'yyyymm') >='202110'
+      group by
+        lt.expressno
+       ,lt.receipttime
+    ) t
+) t
+where t.rn =1
+;
+
+@site_delivery_info_oms:=
+select
+   lps.order_id
+  ,lps.expressno
+from opdc.dw_logistics_package_shipments lps
+where 1=1
+group by
+    lps.order_id
+   ,lps.expressno
+union all
+select
+   lps.order_id
+  ,lps.expressno as expressno
+from popopiedc.dw_logistics_package_shipments lps
+where 1=1
+group by
+    lps.order_id
+   ,lps.expressno
+;
+@delivery_receipt_info:=
+select
+  t.order_id
+ ,concat_ws("|",collect_set(t.expressno)) as expressno
+ ,concat_ws("|",collect_set(nvl(to_char(t.receipttime,'yyyymmdd'),'-'))) as receipttime
+from
+(
+    select
+    a.order_id,
+    a.expressno,
+    b.receipttime
+  from @site_delivery_info_oms a
+  left join @site_receipt_info_oms b
+  on (a.expressno = b.expressno)
+) t
+group by t.order_id
+
+;
+
+
+@order_info:=
+select
+  t.tel
+ ,concat_ws("|",collect_set(t.consignee)) as consignee
+ ,concat_ws("|",collect_set(t.address)) as address
+ ,concat_ws("|",collect_set(t.order_id)) as order_id
+ ,concat_ws("|",collect_set(t.order_no)) as order_no
+ ,concat_ws("|",collect_set(t.pay_type)) as pay_type
+ ,concat_ws("|",collect_set(string(trunc(t.pay_amt)))) as pay_amts
+ ,trunc(t.pay_amt) as pay_amt
+ ,concat(t.tel,'-',trunc(t.pay_amt)) as wheres
+ ,concat_ws("|",collect_set(t.expressno)) as expressno
+ ,concat_ws("|",collect_set(t.receipttime)) as receipttime
+from
+(
+    select distinct a.consignee,a.tel,a.address,b.order_id,b.order_no,b.pay_type,b.pay_amt,c.expressno,c.receipttime
+    from opdc.dw_order_address a
+    left join opdc.dwd_order_sales_process b
+    on (a.order_id = b.erp_order_id)
+    left join @delivery_receipt_info c
+    on (b.order_id = c.order_id)
+    where to_char(a.create_date,'yyyymmdd') >= '20210101' and a.sys_source = 'erp'
+    union
+    select distinct a.consignee,a.tel,a.address,b.order_id,b.order_no,b.pay_type,b.pay_amt,c.expressno,c.receipttime
+    from opdc.dw_order_address a
+    left join opdc.dwd_order_sales_process b
+    on (a.order_id = b.order_id)
+    left join @delivery_receipt_info c
+    on (b.order_id = c.order_id)
+    where to_char(a.create_date,'yyyymmdd') >= '20210101' and a.sys_source != 'erp'
+    union all
+    select distinct a.consignee,a.tel,a.address,b.order_id,b.order_no,b.pay_type,b.pay_amt,c.expressno,c.receipttime
+    from popopiedc.dw_order_address a
+    left join popopiedc.dwd_order_sales_process b
+    on (a.order_id = b.erp_order_id)
+    left join @delivery_receipt_info c
+    on (b.order_id = c.order_id)
+    where to_char(a.create_date,'yyyymmdd') >= '20210101' and a.sys_source = 'erp'
+    union
+    select distinct a.consignee,a.tel,a.address,b.order_id,b.order_no,b.pay_type,b.pay_amt,c.expressno,c.receipttime
+    from popopiedc.dw_order_address a
+    left join popopiedc.dwd_order_sales_process b
+    on (a.order_id = b.order_id)
+    left join @delivery_receipt_info c
+    on (b.order_id = c.order_id)
+    where to_char(a.create_date,'yyyymmdd') >= '20210101' and a.sys_source != 'erp'
+) t
+group by t.tel,trunc(t.pay_amt)
+;
+
+select
+*
+from @order_info a
+where a.tel in (
+'966507222810','507222810'
+);
