@@ -1,0 +1,51 @@
+--name:paypal收款日期匹配
+--author:order
+--create time:2022-02-17 19:29
+@paypay_receive:=
+select
+   a.transaction_id,
+   a.transaction_date,
+   a.paypal_reference_id
+from ods_looklook_mongodb_paypal_transaction_info a
+where a.transaction_event_code in ('T0000','T0006','T0011') and a.pt = '${date}'
+;
+
+@unpaypay_receive:=
+select
+   a.transaction_id,
+   nvl(b.paypal_reference_id,a.paypal_reference_id) as paypal_reference_id
+from ods_looklook_mongodb_paypal_transaction_info a
+left join ods_looklook_mongodb_paypal_transaction_info b
+on (a.transaction_id = b.paypal_reference_id and b.transaction_event_code not in ('T0000','T0006','T0011') and b.pt= '${date}')
+where a.transaction_event_code not in ('T0000','T0006','T0011') and a.pt = '${date}'
+;
+
+@data:=
+select
+  a.transaction_id,
+  b.transaction_date,
+  tos.site_name
+from @unpaypay_receive a
+left join @paypay_receive b
+on (a.paypal_reference_id = nvl(b.paypal_reference_id,b.transaction_id))
+left join dwd_mapping_txn_order_site tos
+on (tos.txn_id = nvl(b.paypal_reference_id,b.transaction_id) and tos.pt = '${date}' and tos.pay_type = 'paypal')
+union all
+select
+  nvl(a.paypal_reference_id,a.transaction_id) as transaction_id,
+  a.transaction_date,
+  tos.site_name
+from @paypay_receive a
+left join dwd_mapping_txn_order_site tos
+on (tos.txn_id = nvl(a.paypal_reference_id,a.transaction_id) and tos.pt = '${date}' and tos.pay_type = 'paypal')
+;
+
+
+select
+ distinct a.*
+from @data a
+where a.transaction_id in (
+
+
+)
+;

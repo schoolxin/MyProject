@@ -1,0 +1,4 @@
+select * from ods_looklook_mongodb_paypal_transaction_info t where t.pt= '${date}' and t.paypal_shop_account = 'Collab@monstervalley.com';
+
+
+select * from app_looklook_daily_paypal_trans_info tt where tt.pt= '${date}' and tt.shop_account = 'payment@popopieshop.com';

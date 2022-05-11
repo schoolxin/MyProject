@@ -1,0 +1,129 @@
+--name:订单明细数据
+--author:OrderPlus
+--create time:2020-10-27 17:25
+--@express_info:=
+--select b.*
+--from
+--(
+--    select
+--        a.order_no,b.express_no,b.company_id,c.name,row_number() over (partition by a.order_no order by b.delivery_time asc) as rn
+--    from ods_erp_erp_order_order a
+--    inner join ods_erp_erp_logistics_delivery b on (a.id = b.order_id and b.pt = '${date}')
+--    inner join ods_erp_erp_logistics_company c
+--    on (b.company_id = c.id and c.pt = '${date}')
+--    where a.pt = '${date}'
+--) b
+--where b.rn =1
+--;
+@oms_order_info:=
+select osp.order_id,osp.erp_order_id
+from opdc.dwd_order_sales_process osp
+group by osp.order_id,osp.erp_order_id
+union all
+select osp.order_id,osp.erp_order_id
+from popopiedc.dwd_order_sales_process osp
+where osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+group by osp.order_id,osp.erp_order_id
+;
+@site_delivery_info_oms:=
+select
+  t.*
+from
+(
+    select
+     lps.order_id
+    ,lps.expressno
+    ,lps.company_name
+    ,row_number() over (partition by lps.order_id order by lps.deliverytime desc) as rn
+  from opdc.dw_logistics_package_shipments lps --opdc 网红订单在erp中创建的  该表中新数据没有网红订单 所以无需过滤
+  where length(trim(lps.expressno)) >0
+  union all
+  select
+     lps.order_id
+    ,lps.expressno
+    ,lps.company_name
+    ,row_number() over (partition by lps.order_id order by lps.deliverytime desc) as rn
+  from popopiedc.dw_logistics_package_shipments lps
+  where length(trim(lps.expressno)) >0
+  --wuting add 排除掉网红订单
+  and lps.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+) t
+where t.rn =1
+;
+@express_info:=
+select
+  io.order_id
+ ,io.erp_order_id
+ ,ios.company_name as name
+ ,ios.expressno as express_no
+ ,eoi.site_order_id
+from @site_delivery_info_oms ios
+inner join @oms_order_info io
+on (ios.order_id = nvl(io.order_id,io.erp_order_id))
+inner join dwd_mapping_erp_order_id eoi
+on (nvl(io.erp_order_id,io.order_id) = eoi.erp_order_id and eoi.pt = max_pt('dwd_mapping_erp_order_id'))
+;
+@final_data_pre:=
+select
+*
+from
+(
+    select
+    a.order_no,
+    a.create_time,
+    concat(c.first_name,' ',c.first_name) as customer_name,
+    'USA' as country,
+    b.name as goods_name,
+    b.count,
+    a.total as order_price_usd,
+    d.express_no,
+    d.name,
+    '' as batch_no,
+    e.domain as shop_url,
+    row_number() over (partition by a.order_no order by a.create_time desc) as rn
+  from orderplus_HK.ods_cloud_orderplus_db_tb_order a
+  inner join
+  (
+    select b.order_id,substring(concat_ws(',',collect_set(b.name)),1,256) as name,sum(b.count) as count
+    from orderplus_HK.ods_cloud_orderplus_db_tb_order_item b
+    where 1=1 and b.pt=max_pt('orderplus_HK.ods_cloud_orderplus_db_tb_order_item') group by b.order_id
+  ) b
+  on (a.id = b.order_id )
+  inner join orderplus_HK.ods_cloud_orderplus_db_tb_order_address c
+  on a.id=c.order_id and c.pt=max_pt('orderplus_HK.ods_cloud_orderplus_db_tb_order_address')
+  inner join @express_info d on (to_char(a.id) = d.site_order_id)
+  inner join orderplus_hk.ods_cloud_orderplus_db_tb_site e
+  on (a.site_id = e.site_id and e.pt=max_pt('orderplus_hk.ods_cloud_orderplus_db_tb_site'))
+  where  a.pt = max_pt('orderplus_HK.ods_cloud_orderplus_db_tb_order') and to_char(a.create_time,'yyyymmdd') <= '${date}' and to_char(a.create_time,'yyyymmdd') >='20220101'
+) t
+where t.rn = 1
+;
+
+@history_info:=
+select
+  a.id
+from stg_daily_suning_pay_order_info a
+where a.pt ='${date}'
+group by a.id
+;
+
+
+insert overwrite table app_looklook_daily_suning_pay_order_info partition (pt = '${date}')
+select
+  a.order_no,
+  to_char(a.create_time,'yyyy-mm-dd hh:mi:ss') as order_date,
+  a.customer_name as customer_name,
+  'USA' as country,
+  a.goods_name as goods_name,
+  a.count,
+  a.order_price_usd as order_price_usd,
+  a.express_no,
+  a.name,
+  sum(a.order_price_usd) over ( partition by to_char(a.create_time,'yyyy-mm-dd') order by a.create_time asc) as total_amount,
+  '' as batch_no,
+  md5(concat(a.order_no,'cloud',a.create_time)) as id,
+  a.shop_url as shop_url
+from @final_data_pre a
+left anti join @history_info hi
+on (md5(concat(a.order_no,'cloud',a.create_time)) = hi.id)
+;
