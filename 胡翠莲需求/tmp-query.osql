@@ -1,0 +1,23 @@
+select * from dwd_mapping_txn_order_site cc where cc.pt = '${date}' and cc.order_id = '84641-ONK00000334';
+
+select * from opdc.ods_oms_order_order tt where tt.site_order_id = '101322040540';
+
+select * from orderplus_hk.ods_cloud_orderplus_db_tb_order a where a.id = '8676369' and a.pt = '${date}';
+
+
+select * from orderplus_hk.ods_cloud_orderplus_db_tb_order_payment t where t.pt = '${date}' and t.order_id = '8676369';
+
+
+select * from dws_looklook_product_purchase_cost_against a where a.mt = '202203';
+
+
+
+select * from opdc.dw_logistics_package_shipments tt where tt.expressno in ('6032422579410','6032422254962','6030122121630','6022822483184');
+
+select * from opdc.dwd_order_sales_process c1 where c1.order_id in (27362673,27371449);
+
+
+SELECT SUM(shipping_amt_cny + sale_income_cny),SUM(quantity)
+FROM opdc.rpt_finance_delivery_detail t WHERE TO_CHAR(delivery_date,'yyyymmdd') = '20220504' and pt = '${date}' and t.web_code = '40';
+
+select * from dwd_looklook_woocommerce_order_info tt where tt.pt = '${date}' and tt.site_name = 'costafly';

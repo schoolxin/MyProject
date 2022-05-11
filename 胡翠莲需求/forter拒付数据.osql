@@ -1,0 +1,35 @@
+--name:forter拒付数据
+--author:order
+--create time:2022-02-25 15:58
+@charged_back_info:=
+select
+*
+from
+(
+  select
+    a.order_id,a.currency_code,a.reasoncode,a.chargeback_description,a.trans_date,a.amount,a.chargeback_type,a.journal_type,
+    row_number() over (partition by a.order_id order by a.trans_date desc) as rn,a.payment_type,a.amount*cct.currency_transform as amount_usd,a.transaction_code,a.payment_reason_level2,a.site_id
+  from app_looklook_fin_spu_chargeback_detail a
+  left join dwd_com_currency_transform cct
+  on (a.trans_date = cct.data_dt and a.currency_code = cct.currency_code and cct.pt = '${date}')
+  where a.chargeback_refunds_type = 'charge_back' and a.trans_date between '20210101' and '20220131' and a.pt = '${date}'
+) t
+where t.rn =1
+;
+
+create table tmp_forter_req_info
+as
+select
+  a.*,
+  b.txn_id,
+  b.txn_at,
+  b.site_type,
+  case when a.payment_reason_level2 rlike '欺诈' or lower(a.chargeback_description) rlike 'fraud' then 'fraud' else 'other' end reasonType
+from @charged_back_info a
+left join dwd_looklook_allsitetype_order_info b
+on (a.order_id = b.order_id and b.pt = '${date}' and b.pt = '${date}' and a.site_id = b.site_id)
+where b.site_type in ('cloud','spsite','shoplazza','shopify')
+;
+
+
+--select * from dwd_looklook_allsitetype_order_info v where v.pt = '${date}' and v.order_id = '107300';

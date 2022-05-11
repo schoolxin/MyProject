@@ -1,0 +1,10 @@
+--name:按照下单时的域名进行汇总支付渠道的收入、退款、拒付
+--author:order
+--create time:2021-10-11 14:02
+select * from ods_looklook_mongodb_shoplazza_order a where a.pt = '${date}' and to_char(a.created_at,'yyyyMMdd')>='20211010';
+
+
+
+--alter table ods_looklook_mongodb_shoplazza_order add columns(browser_ip string,landing_site string);
+
+

@@ -1,0 +1,155 @@
+--name:版权税汇总
+--author:dzz
+--create time:2022-01-20 16:06
+--- 获取每个月月末的事业部名称
+@site_org_info:=
+select
+     t.site_id
+    ,t.site_type_id
+    ,t.site_name
+    ,t.business_unit_name
+    ,t.business_unit_id
+from
+(
+    select
+        substring(a.pt,1,6) as date_month,
+        a.site_id,
+        a.site_type_id,
+        a.site_name,
+        a.business_unit_name,
+        a.business_unit_id,
+        a.pt,
+        row_number() over (partition by substring(a.pt,1,6),a.site_id order by a.pt desc) as rn
+  from dwd_com_site_org_info a
+  where substring(a.pt,1,6) = '${month}'
+) t
+where t.rn=1
+;
+-- 站点应付
+@site_payable_dwd:=
+select
+  cfi.ops_site_id
+ ,cfi.erp_site_id
+ ,cfi.business_unit_name
+ ,cfi.order_id
+ ,cfi.order_no
+ ,cfi.order_date
+ ,cfi.spu_no
+ ,cfi.product_sale_cnt
+ ,cfi.rate
+ ,cfi.lastest_devalue_date
+ ,cfi.product_cost
+ ,cfi.choose_date
+ ,cfi.choose_user_name
+ ,cfi.purchase_cost_against
+ ,cfi.copyright_fees
+ ,cfi.data_month
+ ,cfi.site_name
+ ,cfi.not_subsidy_copyright_fees
+from dwd_looklook_proudct_copyright_fees_info cfi
+where cfi.mt = '${month}' and cfi.data_month = '${month}'
+group by
+  cfi.ops_site_id
+ ,cfi.erp_site_id
+ ,cfi.business_unit_name
+ ,cfi.order_id
+ ,cfi.order_no
+ ,cfi.order_date
+ ,cfi.spu_no
+ ,cfi.product_sale_cnt
+ ,cfi.rate
+ ,cfi.lastest_devalue_date
+ ,cfi.product_cost
+ ,cfi.choose_date
+ ,cfi.choose_user_name
+ ,cfi.purchase_cost_against
+ ,cfi.copyright_fees
+ ,cfi.data_month
+ ,cfi.site_name
+ ,cfi.not_subsidy_copyright_fees
+;
+@copyright_fees_payable_site:=
+select
+  pd.ops_site_id
+ ,pd.data_month
+ ,sum(pd.copyright_fees) as copyright_fees
+ ,sum(pd.not_subsidy_copyright_fees) as not_subsidy_copyright_fees
+ ,'-' as fund_direction
+from @site_payable_dwd pd
+group by
+  pd.ops_site_id
+ ,pd.data_month
+;
+-- 站点应收
+@copyright_fees_receivable_site:=
+select
+  fir.data_month
+ ,fir.site_id as ops_site_id
+ ,sum(copyright_fees_site_bind) as copyright_fees
+ ,sum(not_subsidy_copyright_fees_site_bind) as not_subsidy_copyright_fees
+ ,'+' as fund_direction
+from dwd_looklook_proudct_copyright_fees_info_receivable fir
+where fir.mt = '${month}' and fir.data_month = '${month}'
+group by
+  fir.data_month
+ ,fir.site_id
+;
+
+@copyright_fees_union:=
+select
+  ps.data_month
+ ,ps.ops_site_id
+ ,ps.copyright_fees
+ ,ps.fund_direction
+ ,ps.not_subsidy_copyright_fees
+from @copyright_fees_payable_site ps
+union all
+select
+  rs.data_month
+ ,rs.ops_site_id
+ ,rs.copyright_fees
+ ,rs.fund_direction
+ ,rs.not_subsidy_copyright_fees
+from @copyright_fees_receivable_site rs
+;
+
+@copyright_fees_pre:=
+select
+    fu.data_month
+   ,fu.ops_site_id
+   ,sum(copyright_fees_payable) as copyright_fees_payable
+   ,sum(copyright_fees_receivable) as copyright_fees_receivable
+   ,sum(not_subsidy_copyright_fees_payable) as not_subsidy_copyright_fees_payable
+   ,sum(not_subsidy_copyright_fees_receivable) as not_subsidy_copyright_fees_receivable
+from
+(
+  select
+    fu.data_month
+   ,fu.ops_site_id
+   ,if(fu.fund_direction = '-',copyright_fees,0) as copyright_fees_payable
+   ,if(fu.fund_direction = '+',copyright_fees,0) as copyright_fees_receivable
+   ,if(fu.fund_direction = '-',not_subsidy_copyright_fees,0) as not_subsidy_copyright_fees_payable
+   ,if(fu.fund_direction = '+',not_subsidy_copyright_fees,0) as not_subsidy_copyright_fees_receivable
+  from @copyright_fees_union fu
+) fu
+group by
+    fu.data_month
+   ,fu.ops_site_id
+;
+insert overwrite table dws_looklook_proudct_copyright_fees_info partition (mt = '${month}')
+select
+  fp.ops_site_id as site_id
+ ,oi.site_name
+ ,oi.business_unit_name
+ ,oi.business_unit_id
+ ,fp.copyright_fees_receivable --应收
+ ,fp.copyright_fees_payable -- 应付
+ ,fp.copyright_fees_receivable - fp.copyright_fees_payable as  copyright_fees_net --净值
+ ,fp.data_month
+ ,fp.not_subsidy_copyright_fees_receivable --应收
+ ,fp.not_subsidy_copyright_fees_payable -- 应付
+ ,fp.not_subsidy_copyright_fees_receivable - fp.not_subsidy_copyright_fees_payable as  not_subsidy_copyright_fees_net --净值
+from @copyright_fees_pre fp
+left join @site_org_info oi
+on (fp.ops_site_id = oi.site_id)
+;

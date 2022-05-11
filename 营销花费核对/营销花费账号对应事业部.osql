@@ -1,0 +1,12 @@
+--name:营销花费账号对应事业部
+--author:order
+--create time:2022-04-06 13:45
+select
+   distinct
+   a.account_id
+  ,b.site_id
+from ods_looklook_looklook_tb_market_channel_google a
+left join ods_looklook_looklook_tb_site_market_channel b
+on (a.id = b.obj_id and b.obj_type = 'google' and b.pt = '${date}')
+where a.pt=max_pt('ods_looklook_looklook_tb_market_channel_google')
+;

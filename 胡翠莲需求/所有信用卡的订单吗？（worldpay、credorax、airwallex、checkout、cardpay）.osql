@@ -1,0 +1,26 @@
+--name:所有信用卡的订单吗？（worldpay、credorax、airwallex、checkout、cardpay）
+--author:order
+--create time:2022-03-02 11:56
+
+--这两天麻烦安排一下时间，可以帮忙拉取到所有信用卡的订单吗？（worldpay、credorax、airwallex、checkout、cardpay）
+--拉取2022年1月、2月的； （字段：交易号、支付时间、订单时间、金额、站点、站点平台、支付渠道、支付渠道账号）
+
+create table tmp_credit_channel_received_info20220302
+as
+select
+  a.transaction_id,
+  a.trans_date,
+  a.order_date,
+  a.trans_amount,
+  a.currency_code,
+  a.site_id,
+  a.site_name,
+  a.site_type,
+  a.payment_type,
+  a.shop_account
+from dwd_looklook_allpaytype_trans_order_info a
+where a.pt = '${date}' and a.trans_date between '20220101' and '20220231' and a.payment_type in ('cardpay','worldpay','credorax','airwallex','checkout') and a.payments_received!=0;
+
+
+
+--select * from ods_looklook_mongodb_shoplazza_order tt where tt.id = '39449-IN00011362' and tt.pt = '${date}';

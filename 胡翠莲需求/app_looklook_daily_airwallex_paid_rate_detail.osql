@@ -1,0 +1,89 @@
+--name:airwallex支付成功率分析
+--author:order
+--create time:2021-09-23 11:26
+
+@shoplazza_paid_rate:=
+select
+    to_char(a.created_at,'yyyymmdd') as order_date,
+    a.id as order_id,
+    'shoplazza' as site_type,
+    case when lower(a.financial_status) in ('paid','partially_refunded','refunded') then 'paid' else 'unpaid' end as payment_status,
+    get_json_object(a.payment_line,'$.transaction_no') as trade_no,
+    a.total_price*cct.currency_transform as total_price_usd,
+    b.merchant_code,
+    lower(soi.shopify_site_name) as site_name,
+    soi.site_id,
+    case when b.merchant_code is null then 1 else 0 end as is_abandon,
+    a.number
+from ods_looklook_mongodb_shoplazza_order a
+left join
+(
+    select  b.site_name as merchant_code,b.merchant_order_id
+    from ods_looklook_mongodb_airwallex_payments b
+    where b.pt = '${date}'
+    group by b.site_name,b.merchant_order_id
+) b
+on (a.id = b.merchant_order_id)
+left join dwd_com_currency_transform cct
+on (to_char(a.created_at,'yyyymmdd') = cct.data_dt and cct.currency_code = a.currency and cct.pt ='${date}')
+left join dwd_loolook_shoplazza_to_ops_mapping soi
+on lower(a.site_name)=lower(soi.shopify_site_name) and  soi.pt=max_pt('dwd_loolook_shoplazza_to_ops_mapping')
+where 1=1 and get_json_object(a.payment_line,'$.payment_channel')  rlike 'airwallex' and a.pt = '${date}'
+;
+
+
+@cloud_paid_rate:=
+select
+  to_char(a.order_date,'yyyymmdd') as order_date,
+  a.order_no,
+  'cloud' as site_type,
+  case when lower(a.payment_status) in ('paid','partially_refunded','refunded') then 'paid' else 'unpaid' end as payment_status,
+  b.trade_no,
+  a.total_amount_usd,
+  b.merchant_code as merchant_code,
+  a.site_id,
+  a.site_name,
+ case when length(trim(nvl(trade_no,'')))=0 then 1 else 0 end as is_abandon  -- 交易号未在支付渠道找到的 认为是弃单
+from dwd_looklook_cloud_order_info a
+left join
+(
+  select
+    b.order_no,concat_ws('|',collect_set(vv.id)) as trade_no,concat_ws('|',collect_set(nvl(vv.site_name,b.payment_account))) as merchant_code
+  from orderplus_hk.ods_cloud_orderplus_db_tb_order_payment b
+  left join ods_looklook_mongodb_airwallex_payments vv
+  on (b.checkout_id = vv.request_id and vv.pt = '${date}')
+  where b.pt = '${date}' and b.pay_type = '29'
+  group by b.order_no
+
+) b
+on (a.order_no= b.order_no)
+where a.pt = '${date}' and a.pay_type = '29' and to_char(a.order_date,'yyyymmdd')>='20200101'
+;
+
+insert overwrite table app_looklook_daily_airwallex_paid_rate_detail partition (pt= '${date}')
+select
+   a.order_date,
+   a.order_id as order_no,
+   a.site_type,
+   a.payment_status,
+   a.trade_no,
+   a.total_price_usd as total_amount_usd,
+   a.merchant_code,
+   a.site_id,
+   a.site_name,
+   a.is_abandon
+from @shoplazza_paid_rate a
+union all
+select
+   a.order_date,
+   a.order_no as order_no,
+   a.site_type,
+   a.payment_status,
+   a.trade_no,
+   a.total_amount_usd as total_amount_usd,
+   a.merchant_code,
+   a.site_id,
+   a.site_name,
+   a.is_abandon
+from @cloud_paid_rate a
+;

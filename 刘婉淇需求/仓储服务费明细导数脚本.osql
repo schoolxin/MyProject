@@ -1,0 +1,30 @@
+--name:仓储服务费明细导数脚本
+--author:order
+--create time:2022-03-30 13:47
+create table tmp_proudct_stock_fees_infoace
+as
+select
+     a.data_dt as "库存日期"
+    ,a.product_no as "SPU"
+    ,a.business_name as "事业部名称"
+    ,a.choose_user_name as "选款人"
+    ,a.choose_date as "选款日期"
+    ,a.product_belong_cnt as "SPU绑定的事业部数"
+    ,a.stock_amt as "库存"
+    ,a.product_sale_cnt_total as "SPU总销量"
+    ,a.product_sale_cnt_bu as "SPU所属事业部销量"
+    ,a.weight_rate_bu as "事业部均摊系数"
+    ,a.product_stock_fees as "SPU仓储物流费"
+    ,a.site_id as "站点ID"
+    ,a.site_name as "站点"
+    ,a.product_belong_site_cnt as "SPU绑定的站点数"
+    ,a.product_sale_cnt_site as "站点销量"
+    ,a.weight_rate_site as "站点均摊系数"
+    ,a.product_stock_fees_bu as "事业部仓储物流费"
+    ,a.product_stock_fees_bu_site as "站点仓储物流费"
+from dwd_looklook_proudct_stock_fees_info a
+where a.mt = '202202' and a.business_name in ('ACE事业部') and a.choose_date between '20211001' and '20220231'
+
+;
+
+--drop table tmp_proudct_stock_fees_infomdl11_1;

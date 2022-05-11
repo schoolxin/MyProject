@@ -1,0 +1,83 @@
+--name:forter数据匹配oms订单
+--author:order
+--create time:2022-04-11 16:14
+@oms_order_info:=
+select
+   oo.site_id
+  ,oo.site_order_id
+  ,oo.site_order_no
+  ,oo.order_no
+  ,oo.id as order_id
+  ,oo.order_time
+  ,oo.add_time
+  ,ds.ops_site_id
+  ,ds.site_type
+  ,ds.site_name
+  ,oo.pay_time
+  ,oo.create_date
+from opdc.ods_oms_order_order oo
+left join opdc.dim_site ds
+on (oo.site_id = ds.site_id)
+left join popopiedc.ods_oms_order_order poo
+on (oo.site_order_no = poo.site_order_no and oo.site_id = poo.site_id)
+where poo.id is null and oo.is_delete = 0
+union all
+select
+   oo.site_id
+  ,oo.site_order_id
+  ,oo.site_order_no
+  ,oo.order_no
+  ,oo.id as order_id
+  ,oo.order_time
+  ,oo.add_time
+  ,ds.ops_site_id
+  ,ds.site_type
+  ,ds.site_name
+  ,oo.pay_time
+  ,oo.create_date
+from popopiedc.ods_oms_order_order oo
+left join opdc.dim_site ds
+on (oo.site_id = ds.site_id)
+where 1= 1 and oo.is_delete = 0
+;
+
+@cloud_order_info:=
+select
+    cc.trade_no
+   ,concat_ws(",",collect_set(oms_order_no))  as oms_order_no
+   ,concat_ws(",",collect_set(order_no))  as cloud_order_no
+from
+(
+  select
+    t.trade_no,
+    t1.order_no,
+    oi.order_no as oms_order_no
+  from orderplus_hk.ods_cloud_orderplus_db_tb_order_payment t
+  left  join orderplus_hk.ods_cloud_orderplus_db_tb_order t1
+  on (t.order_id = t1.id and t1.pt = '${date}')
+  left join @oms_order_info oi
+  on (t1.order_no = oi.site_order_no and oi.site_type = 'chimpone')
+  where t.pt = '${date}'
+  union all
+  select
+    t.checkout_id as trade_no,
+    t1.order_no,
+    oi.order_no as oms_order_no
+  from orderplus_hk.ods_cloud_orderplus_db_tb_order_payment t
+  left  join orderplus_hk.ods_cloud_orderplus_db_tb_order t1
+  on (t.order_id = t1.id and t1.pt = '${date}')
+  left join @oms_order_info oi
+  on (t1.order_no = oi.site_order_no and oi.site_type = 'chimpone')
+  where t.pt = '${date}'
+) cc
+group by cc.trade_no
+;
+
+select
+*
+from @cloud_order_info a
+where a.trade_no in
+(
+
+)
+;

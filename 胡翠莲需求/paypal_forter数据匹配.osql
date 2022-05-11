@@ -1,0 +1,48 @@
+--name:paypal_forter数据匹配
+--author:order
+--create time:2022-03-19 13:45
+select
+  t1.order_no,
+  t1.id as order_id,
+  t1.create_time,
+  t.err,
+  case
+      when t.pay_type in (1,2,3) then 'paypal'
+      when t.pay_type in (4) then 'oceanpay'
+      when t.pay_type in (5) then 'worldpay'
+      when t.pay_type in (10) then 'pacypay'
+      when t.pay_type = 13 then 'ingenico'
+      when t.pay_type = 9 then 'COD'
+      when t.pay_type = 14 then 'adyen'
+      when t.pay_type = 15 then 'checkout'
+      when t.pay_type = 16 then 'pingpong'
+      when t.pay_type = 17 then 'cardpay'
+      when t.pay_type = 18 then 'ebanx'
+      when t.pay_type = 19 then 'credorax'
+      when t.pay_type = 20 then 'oceanpaycash'
+      when t.pay_type = 22 then 'paidy'
+      when t.pay_type = 23 then 'motonpay'
+      when t.pay_type = 25 then 'worldpay'
+      when t.pay_type = 24 then 'goallpay'
+      when t.pay_type = 29 then 'airwallex'
+      when t.pay_type = 26 then 'paypal'
+      when t.pay_type in (30,31) then 'afterpay'
+  end as pay_type,
+  t.is_success,
+  t.status,
+  t.trade_no,
+  t.checkout_id,
+  t.payment_account,
+  t1.payment_status,
+  t2.transaction_id,
+  t2.paypal_shop_account,
+  t2.transaction_event_code
+from orderplus_hk.ods_cloud_orderplus_db_tb_order_payment t
+left  join orderplus_hk.ods_cloud_orderplus_db_tb_order t1
+on (t.order_id = t1.id and t1.pt = '${date}')
+left join ods_looklook_mongodb_paypal_transaction_info t2
+on (t.trade_no = t2.transaction_id and t2.pt = '${date}')
+where t.pt = '${date}' and t.checkout_id in
+(
+)
+;

@@ -1,0 +1,21 @@
+--name:paypal2月3月订单退款情况
+--author:order
+--create time:2022-03-23 18:04
+select
+  a.trans_date as "退款日期"
+ ,a.merchant_code as "商户号"
+ ,a.order_no as "订单编号"
+ ,a.order_id_opdc as "oms订单ID"
+ ,a.transaction_code as "交易号"
+ ,a.add_time as "订单日期"
+ ,sum(a.share_amount*a.currency_transform) as "退款金额USD"
+from app_looklook_fin_spu_chargeback_detail a
+where a.chargeback_refunds_type = 'refunds' and a.payment_type = 'paypal' and a.pt = '${date}' and to_char(a.add_time,'yyyymm') in ('202202','202203')
+group by
+  a.trans_date
+ ,a.merchant_code
+ ,a.order_no
+ ,a.order_id_opdc
+ ,a.transaction_code
+ ,a.add_time
+;

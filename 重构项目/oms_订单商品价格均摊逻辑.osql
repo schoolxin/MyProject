@@ -1,0 +1,24 @@
+--name:oms_订单商品价格均摊逻辑
+--author:order
+--create time:2022-04-21 13:41
+select * from opdc.dwd_order_sales_process t where t.order_id = '27508925';
+select * from opdc.dw_logistics_package_shipments t where t.expressno = 'JSESA3195056086YQ';
+
+select * from opdc.ods_ferp_wms_delivery_order t1 where t1.logistics_no = 'JSESA3195056086YQ';
+select sum(gmv_amount_cny) as gmv_amount_cny ,a.site_id,a.pt
+from app_looklook_site_delivery_gmv_logis_info a where a.pt >= '${date}' and a.data_dt between '20220301' and '20220331'
+group by a.site_id,a.pt
+having gmv_amount_cny>0;
+
+
+--select 50356802.768448342798751215 - 49467596.23127472008146059;
+
+
+select *
+from dwd_looklook_clear_report_delivery_gmv_purchase_logistic_info a
+where a.pt = '${date}' and a.发货日期  between '20220301' and '20220331' and a.ops站点id = '194' and a.物流单号 = 'UG399905087YP';
+
+
+select * from opdc.ods_erp_erp_wms_mqmessage tt where tt.wmspackageid = 'PB20220331000313';
+
+select * from looklook.static_refunds_chargeback_reason_mapping t where t.chargeback_refunds_type = 'charge_back';

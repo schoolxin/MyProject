@@ -1,0 +1,145 @@
+
+--name:app_looklook_erp_every_day_purchasecost_new
+--author:order
+--create time:2021-11-09 19:37
+
+--select * from @product_sku_discount_info v where v.sku_id = '8564598';
+@discount_sku_info:=
+select
+  t.pms_spu_id as spu_id,t.product_no as oldno,t.pms_sku_id as sku_id,t.start_time,t.end_time,t.discount_info
+from dws_product_discount_info t
+where t.pt = '${date}'
+;
+
+@mapping_erp_site_info:=
+select
+    t2.site_id,
+    t2.site_name,
+    t2.erp_site_id
+from
+(
+    select
+    t1.site_name,
+    t1.site_id,
+    t1.erp_site_id,
+    t1.status,
+    row_number() over (partition by t1.erp_site_id order by t1.status asc) as rn
+    from
+    (
+        select
+            a.site_name,
+            a.site_id,
+            case when b.site_type_id = 4 then a.cod_erp_site_id else a.erp_site_id end as erp_site_id,
+            b.status
+        from dwd_mapping_erp_site_id a
+        join ods_looklook_looklook_tb_site b
+        on (a.site_id = b.id and b.pt='${date}')
+        where a.pt='${date}'
+    ) t1
+) t2
+where t2.rn =1
+
+;
+
+@order_info:=
+select
+  to_char(osp.paytime,'yyyymmdd') as pay_date,
+  osp.spu_erp_id,
+  osp.spu_no,
+  osp.spu_id,
+  osp.system_type,
+  osp.order_id,
+  osp.order_no,
+  ds.avg_purchase_price,-- 平均采购价
+  ds.supply_price, -- 供货单价
+  ds.purchase_guide_max_price,--采购指导价最高
+  ds.purchase_guide_min_price,--采购指导价最低
+  ds.product_no,
+  ds.pms_spu_id,
+  ds.lms_pd_id,
+  osp.current_sku_qty,
+  osp.sales_qty,
+  ooa.site_id,
+  osp.sku_erp_id,
+  nvl(coalesce(ds.avg_purchase_price,ds.supply_price,purchase_guide_max_price,purchase_guide_min_price),0) as purchase_price,
+  nvl(coalesce(ds.not_subsidy_avg_purchase_price,ds.supply_price,purchase_guide_max_price,purchase_guide_min_price),0) as not_subsidy_purchase_price,
+  nvl(dsi.discount_info,1) as discount_info
+from opdc.dwd_order_sales_process osp
+inner join (
+      select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+left join opdc.dim_spu ds
+on (osp.spu_no = ds.product_no)
+left join @discount_sku_info dsi
+on osp.sku_erp_id = dsi.sku_id and to_char(osp.paytime,'yyyymmddhhmiss')>=nvl(dsi.start_time,'99991231235959') and to_char(osp.paytime,'yyyymmddhhmiss')<=nvl(dsi.end_time,'99991231235959')
+where to_char(osp.paytime,'yyyymmdd')>='20211109' and osp.change_type = '下单'
+and osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) --剔除网红手工订单
+union all
+--宝宝派
+select
+  to_char(osp.paytime,'yyyymmdd') as pay_date,
+  osp.spu_erp_id,
+  osp.spu_no,
+  osp.spu_id,
+  osp.system_type,
+  osp.order_id,
+  osp.order_no,
+  ds.avg_purchase_price,-- 平均采购价
+  ds.supply_price, -- 供货单价
+  ds.purchase_guide_max_price,--采购指导价最高
+  ds.purchase_guide_min_price,--采购指导价最低
+  ds.product_no,
+  ds.pms_spu_id,
+  ds.lms_pd_id,
+  osp.current_sku_qty,
+  osp.sales_qty,
+  ooa.site_id,
+  osp.sku_erp_id,
+  nvl(coalesce(ds.avg_purchase_price,ds.supply_price,purchase_guide_max_price,purchase_guide_min_price),0) as purchase_price,
+  nvl(coalesce(ds.not_subsidy_avg_purchase_price,ds.supply_price,purchase_guide_max_price,purchase_guide_min_price),0) as not_subsidy_purchase_price,
+  nvl(dsi.discount_info,1) as discount_info
+from popopiedc.dwd_order_sales_process osp
+inner join (
+      select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+) ooa
+on (osp.order_id = ooa.order_id)
+left join popopiedc.dim_spu ds
+on (osp.spu_no = ds.product_no)
+left join @discount_sku_info dsi
+on osp.sku_erp_id = dsi.sku_id and to_char(osp.paytime,'yyyymmddhhmiss')>=nvl(dsi.start_time,'99991231235959') and to_char(osp.paytime,'yyyymmddhhmiss')<=nvl(dsi.end_time,'99991231235959')
+where to_char(osp.paytime,'yyyymmdd')>='20211109' and osp.change_type = '下单'
+--wuting add 排除掉网红订单
+and osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+;
+
+--insert overwrite table app_looklook_erp_every_day_purchasecost_new partition(dt)
+
+select
+    bigint(a.site_id) as "erp站点ID",
+    b.site_name as "ops站点名称",
+    a.pay_date as "支付日期",
+    a.spu_no as "商品SPU",
+    a.order_no as "订单编号",
+    a.purchase_price as "采购单价(含补贴价)",
+    a.not_subsidy_purchase_price as "采购单价(不含补贴价)",
+    sum(a.sales_qty) as "销售数量",
+    sum(purchase_price*a.sales_qty) as "采购成本",
+    sum(not_subsidy_purchase_price*a.sales_qty) as "不含补贴价的采购成本" -- 不含补贴价的采购成本
+from @order_info a
+inner join @mapping_erp_site_info b
+on (a.site_id = b.erp_site_id)
+where a.pay_date >='20220401' and a.pay_date <='20220410' and b.site_name = 'lilygirldress'
+group by
+  a.pay_date,
+  a.site_id,
+  a.spu_no,
+  a.order_no,
+  a.purchase_price,
+  a.not_subsidy_purchase_price,
+  b.site_name
+;
+
+
+
+select * from opdc.dwd_order_sales_process v where v.site_id = '49760';

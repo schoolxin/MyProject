@@ -1,0 +1,191 @@
+--name:popopieshop信用卡支付失败原因
+--author:order
+--create time:2022-03-16 15:54
+@cloud_order_info:=
+select
+  t1.order_no,
+  t1.id as order_id,
+  t1.create_time,
+  t.err,
+  case
+      when t.pay_type in (1,2,3) then 'paypal'
+      when t.pay_type in (4) then 'oceanpay'
+      when t.pay_type in (5) then 'worldpay'
+      when t.pay_type in (10) then 'pacypay'
+      when t.pay_type = 13 then 'ingenico'
+      when t.pay_type = 9 then 'COD'
+      when t.pay_type = 14 then 'adyen'
+      when t.pay_type = 15 then 'checkout'
+      when t.pay_type = 16 then 'pingpong'
+      when t.pay_type = 17 then 'cardpay'
+      when t.pay_type = 18 then 'ebanx'
+      when t.pay_type = 19 then 'credorax'
+      when t.pay_type = 20 then 'oceanpaycash'
+      when t.pay_type = 22 then 'paidy'
+      when t.pay_type = 23 then 'motonpay'
+      when t.pay_type = 25 then 'worldpay'
+      when t.pay_type = 24 then 'goallpay'
+      when t.pay_type in (29,32) then 'airwallex'
+      when t.pay_type = 26 then 'paypal'
+      when t.pay_type in (30,31) then 'afterpay'
+      else t.pay_type
+  end as pay_type,
+  t.is_success,
+  t.status,
+  case when t.pay_type = 19 then checkout_id  when t.pay_type = '15' then t1.order_no else t.trade_no end trade_no,
+  t.checkout_id,
+  t.payment_account,
+  t1.payment_status
+from orderplus_hk.ods_cloud_orderplus_db_tb_order_payment t
+inner join orderplus_hk.ods_cloud_orderplus_db_tb_order t1
+on (t.order_id = t1.id and t1.pt = '${date}')
+where t.pt = '${date}' and to_char(t1.create_time,'yyyymmdd') >='20220101'
+and lower(t1.payment_status) not in ('paid','partially_refunded','refunded')
+;
+
+--select * from @cloud_order_info t where t.pay_type in (21,28);
+
+@worldpay_reason:=
+select
+   t1.transaction_code as trade_no,
+   concat_ws("^",collect_set(refusal_reason)) as fail_reason,
+    concat_ws("^",collect_set(t1.merchant_code)) as merchant_code,
+   'worldpay' as pay_type
+from  ods_looklook_mongodb_worldpay_info t1
+where t1.pt = '${date}'
+group by t1.transaction_code
+;
+
+@cardpay_reason:=
+select
+  t.trade_no,
+  concat_ws("^",collect_set(error_message)) as fail_reason,
+  concat_ws("^",collect_set(terminal_code)) as merchant_code,
+  'cardpay' as pay_type
+from
+(
+    select
+    get_json_object(a.payment_data,'$.id') as trade_no,
+    get_json_object(a.payment_data,'$.decline_reason') as error_message,
+    a.terminal_code
+  from ods_looklook_mongodb_cardpay_payments a
+  where a.pt = '${date}'
+) t
+group by t.trade_no
+;
+@airwallex_reason:=
+select
+  t.trade_no,
+  concat_ws("^",collect_set(error_message)) as fail_reason,
+  concat_ws("^",collect_set(site_name)) as merchant_code,
+  'airwallex' as pay_type
+from
+(
+    select
+    id as trade_no,
+    a.status as error_message,
+    a.site_name
+  from ods_looklook_mongodb_airwallex_payments a
+  where a.pt = '${date}'
+) t
+group by t.trade_no
+;
+-- credorax 渠道失败原因
+@credorax_reason:=
+select
+  a.request_id as trade_no,
+  concat_ws("^",collect_set(a.auth_response_desc)) as fail_reason,
+  concat_ws("^",collect_set(mid)) as merchant_code,
+  'credorax' as pay_type
+from ods_looklook_mongodb_credorax_authorisation_activity a
+where a.pt = '${date}'
+group by a.request_id
+;
+-- checkout 渠道失败原因
+@checkout_reason:=
+select
+  a.reference as trade_no,
+  concat_ws("^",collect_set(a.response_description)) as fail_reason,
+  concat_ws("^",collect_set(a.channel_name)) as merchant_code,
+  'checkout' as pay_type
+from ods_looklook_mongodb_checkout_data_csv a
+where a.pt = '${date}'
+group by a.reference
+;
+--pacypay 渠道失败原因
+@pacypay_reason:=
+select
+  a.unique_id as trade_no,
+  concat_ws("^",collect_set(a.remark)) as fail_reason,
+  concat_ws("^",collect_set(a.merchant_no)) as merchant_code,
+  'pacypay' as pay_type
+from ods_looklook_mongodb_pacypay_transaction a
+where a.pt = '${date}'
+group by a.unique_id
+;
+
+
+--afterpay 支付渠道没有支付失败原因
+--支付渠道失败汇总
+@all_pay_type_reason:=
+select
+  a.trade_no,
+  a.pay_type,
+  a.fail_reason,
+  a.merchant_code
+from @worldpay_reason a
+union all
+select
+  a.trade_no,
+  a.pay_type,
+  a.fail_reason,
+  a.merchant_code
+from @cardpay_reason a
+union all
+select
+  a.trade_no,
+  a.pay_type,
+  a.fail_reason,
+  a.merchant_code
+from @airwallex_reason a
+union all
+select
+  a.trade_no,
+  a.pay_type,
+  a.fail_reason,
+  a.merchant_code
+from @credorax_reason a
+union all
+select
+  a.trade_no,
+  a.pay_type,
+  a.fail_reason,
+  a.merchant_code
+from @checkout_reason a
+union all
+select
+  a.trade_no,
+  a.pay_type,
+  a.fail_reason,
+  a.merchant_code
+from @pacypay_reason a
+;
+
+insert overwrite table  dwd_looklook_cloud_order_unpaid_reason_info partition (pt = '${date}')
+select
+  t.order_no,
+  t.order_id,
+  t.trade_no as "云站交易号",
+  t.payment_status as "订单状态",
+  t.create_time as order_time,
+  t.pay_type as "支付方式",
+  t.is_success as "是否支付成功",
+  t.err as "云站原因",
+  t1.fail_reason as "支付渠道原因",
+  t.payment_account as "云站商户号",
+  t1.merchant_code as "支付渠道商户号",
+  t1.trade_no as "支付渠道交易号"
+from @cloud_order_info t
+left join @all_pay_type_reason t1
+on (t.trade_no = t1.trade_no and t.pay_type = t1.pay_type)
+;

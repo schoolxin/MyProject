@@ -1,0 +1,81 @@
+--name:sunjoy_xingying_明细
+--author:OrderPlusMhxzKhl$
+--create time:2021-06-28 13:56
+--credorax
+@credorax_receive_info:=
+select
+  a.request_id,min(a.card_scheme) as card_type,a.payment_id
+from ods_looklook_mongodb_credorax_processing_activity a
+where a.pt = '${date}' and a.transaction_type = 'Purchase'
+group by a.request_id,a.payment_id
+;
+@credorax_chargeback_info:=
+select
+  *
+from
+(
+    select
+    a.posting_date as transaction_date,
+    a.mid as merchant_code,
+    a.cbk_amount as transaction_amount,
+    a.cbk_currency as currency_code,
+    a.transaction_type,
+    a.orig_request_id as request_id,
+    a.payment_id,
+    a.reason_desc,
+    row_number() over (partition by a.orig_request_id order by a.posting_date asc) as rn
+  from ods_looklook_mongodb_credorax_chargeback_activity a
+  where a.pt = '${date}'
+) t
+where t.rn = 1  --只取最开始的一笔
+;
+
+@credorax_chargeback_detail:=
+select
+  a.transaction_date as trans_date,
+  a.merchant_code,
+  nvl(b.site_id,0) as site_id,
+  nvl(b.site_name,'other') as site_name,
+  a.currency_code,
+  abs(nvl(a.transaction_amount,0)) as chargeback_amount,
+  cct.currency_transform as currency_to_usd,
+  a.request_id as transaction_id,
+  b.order_id,
+  a.transaction_type as chargerback_stage,
+  a.reason_desc as reason,
+  'credorax' as payment_type,
+  case when c.card_type rlike 'Mastercard' then 'MC' when c.card_type rlike 'Visa' then 'Visa' else 'Others' end as card_type,
+  case when lower(a.reason_desc) rlike 'fraud' then '1'
+       when lower(a.reason_desc) rlike 'authorization' and lower(a.reason_desc) rlike 'no' then '1'
+       when lower(a.reason_desc) rlike 'authorisation' and lower(a.reason_desc) rlike 'no' then '1'
+       when lower(a.reason_desc) rlike 'authoriation' and lower(a.reason_desc) rlike 'no' then '1'
+       else '0'
+  end as if_fraud
+from @credorax_chargeback_info a
+left join dwd_mapping_txn_order_site b
+on ((a.request_id = b.txn_id) and b.pt = '${date}' and b.pay_type='credorax')
+left join dwd_com_currency_transform cct
+on (a.transaction_date = cct.data_dt and a.currency_code = cct.currency_code and cct.pt = '${date}')
+left join @credorax_receive_info c
+on (a.request_id = c.request_id)
+;
+
+
+insert overwrite table app_looklook_daily_credorax_chargeback_detail_info partition (pt='${date}')
+select
+  a.trans_date,
+  a.merchant_code,
+  a.site_id,
+  a.site_name,
+  a.currency_code,
+  a.chargeback_amount,
+  a.currency_to_usd,
+  a.transaction_id,
+  a.order_id,
+  a.chargerback_stage,
+  a.reason,
+  a.payment_type,
+  a.card_type,
+  a.if_fraud
+from @credorax_chargeback_detail a
+;

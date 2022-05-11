@@ -1,0 +1,7 @@
+--name:支付渠道明细宽表
+--author:order
+--create time:2022-04-02 17:52
+select * from dwd_mapping_txn_order_site cc where cc.txn_id = 'int_hkpd4j28sg8fzb6e2gx' and cc.pt = '${date}';
+
+
+select * from dwd_looklook_cloud_order_info  tt where tt.pt = '${date}' and tt.id = '8664473';

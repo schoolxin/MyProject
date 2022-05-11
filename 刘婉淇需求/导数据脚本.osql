@@ -1,0 +1,10 @@
+--name:导数据脚本
+--author:order
+--create time:2022-03-29 11:55
+--drop table tmp_cod_report_sign_gmv_and_service_fee_info12;
+--drop table tmp_cod_report_sign_gmv_and_service_fee_info10to02;
+
+
+
+select * from dwd_looklook_proudct_copyright_fees_info tt where tt.mt = '202203' and tt.site_name = 'anfixer';
+

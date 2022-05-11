@@ -1,0 +1,45 @@
+--name:berrylook_wd支付失败原因分析
+--author:order
+--create time:2022-03-05 15:24
+
+--select
+--  to_char(b.date_beijing,'yyyymmdd') as trans_date,
+--  b.refusal_reason as error_message,
+--  b.transaction_code as trade_no,
+--  b.amount as trans_amount,
+--  b.currency_code as currency_code,
+--  soi.order_id,
+--  soi.order_sn,
+--  soi.order_status,
+--  soi.payment_date,
+--  b.status,
+--  soi.pay_name,
+--  soi.txn_id
+--from ods_looklook_mongodb_worldpay_info b
+--inner join dwd_looklook_spsite_order_info soi
+--on (substring(b.transaction_code,1,instr(b.transaction_code,'_')-1) = soi.order_sn and soi.site_name = 'berrylook' and soi.pt = '${date}' and soi.payment_date is null)
+--where b.pt = '${date}'
+----and b.status in ('REFUSED','CANCELLED','ERROR','EXPIRED','SOFT_DECLINED')
+--and to_char(b.date_beijing,'yyyymm') in ('','') and instr(b.transaction_code,'_')>0 and b.refusal_reason is not null
+--;
+
+
+
+
+select
+  distinct
+  soi.order_sn,
+  soi.order_date,
+  soi.pay_name,
+  b.refusal_reason,
+  nvl(soi.shipping_country_name,soi.default_country_name) as country_name,
+  nvl(soi.shipping_customer_email,soi.default_customer_email) as customer_email
+from dwd_looklook_spsite_order_info soi
+left join ods_looklook_mongodb_worldpay_info b
+on (substring(b.transaction_code,1,instr(b.transaction_code,'_')-1) = soi.order_sn and b.pt = '${date}' and instr(b.transaction_code,'_')>0)
+where soi.pt = '${date}' and to_char(soi.order_date,'yyyymm') in ('202112','202202')
+and soi.payment_date is null and soi.site_name = 'berrylook'
+;
+
+
+--select * from ods_looklook_mongodb_paypal_transaction_info t where t.custom_field rlike 'E2155763' and t.pt = '${date}';

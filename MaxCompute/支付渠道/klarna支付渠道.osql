@@ -1,0 +1,49 @@
+--name:klarna支付渠道
+--author:order
+--create time:2022-04-11 17:49
+@klarna_payments_info:=
+select
+  to_char(format_shopify_date(kp.sale_date),'yyyymmdd') as trans_date
+ ,kp.merchant_code as merchant_code
+ ,nvl(tos.site_id,0) as site_id
+ ,nvl(tos.site_name,'other') as site_name
+ ,kp.currency_code
+ ,kp.amount / 100 as transaction_amount
+ ,kp.type
+ ,kp.detailed_type
+ ,case when lower(kp.type) = 'sale' then kp.amount / 100 else 0 end as payments_received
+ ,case when lower(kp.type) = 'return' then kp.amount / 100 else 0 end as refunds
+ ,case when lower(kp.type) = 'sale' then tos.order_id end as payments_received_order_id
+ ,case when lower(kp.type) = 'return' then tos.order_id end as refunds_order_id
+ ,0 as chargeback
+ ,0 as chargeback_order_count
+ ,case when lower(kp.type) = 'fee' and lower(kp.detailed_type) = 'purchase_fee_fixed' then kp.amount / 100 else 0 end as purchase_fee_fixed
+ ,case when lower(kp.type) = 'fee' and lower(kp.detailed_type) = 'purchase_fee_percentage' then kp.amount / 100 else 0 end as purchase_fee_percentage
+from ods_looklook_mongodb_klarna_payments kp
+left join dwd_mapping_txn_order_site tos
+on (kp.order_id = tos.txn_id and tos.pay_type = 'klarna' and tos.pt = '${date}')
+where kp.pt = '${date}';
+
+insert overwrite table app_looklook_daily_klarna_trans_info partition (pt = '${date}')
+select
+  kpi.trans_date
+ ,kpi.merchant_code
+ ,kpi.site_id
+ ,kpi.site_name
+ ,kpi.currency_code
+ ,sum(kpi.payments_received) as payments_received
+ ,count(distinct payments_received_order_id) as payment_order_count
+ ,sum(-kpi.refunds) as refunds
+ ,count(distinct refunds_order_id) as refunds_order_count
+ ,sum(-purchase_fee_fixed) as purchase_fee_fixed
+ ,sum(-purchase_fee_percentage) as purchase_fee_percentage
+ ,sum(-kpi.chargeback) as chargeback
+ ,0 as chargeback_order_count
+from @klarna_payments_info kpi
+group by
+  kpi.trans_date
+ ,kpi.merchant_code
+ ,kpi.site_id
+ ,kpi.site_name
+ ,kpi.currency_code
+;

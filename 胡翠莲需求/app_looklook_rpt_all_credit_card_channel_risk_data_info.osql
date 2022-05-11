@@ -1,0 +1,1055 @@
+--name:信用卡收入退款拒付
+--author:OrderPlus
+--create time:2021-03-02 11:28
+-- wd 卡组拒付数据 按拒付退款收款日期统计  并且按最开始发起拒付的日期统计(也就是说一笔交易发起多次拒付 只算最开始的一次) 其他信用卡跟wd一样的逻辑
+-- 日期  支付渠道  商户号  卡种  期间收入 期间收款笔数  期间拒付  期间拒付笔数   期间退款  期间退款笔数  上月收入  上月收款笔数
+
+-- wd 卡组拒付数据 按拒付日期统计  并且按最开始发起拒付的日期统计(也就是说一笔交易发起多次拒付 只算最开始的一次) 其他信用卡跟wd一样的逻辑
+--airwallex
+@airwallex_dispute_info:=
+select
+  format_shopify_date(a.created_at) as created_at,
+  get_json_object(a.data,'$.object.payment_intent_id') as payment_intent_id,
+  get_json_object(a.data,'$.object.card_scheme') as card_scheme,
+  get_json_object(a.data,'$.object.dispute_amount') as dispute_amount,
+  get_json_object(a.data,'$.object.dispute_currency') as dispute_currency,
+  get_json_object(a.data,'$.object.dispute_reason_type') as dispute_reason,
+  format_shopify_date(get_json_object(a.data,'$.object.updated_at')) as updated_at,
+  get_json_object(a.data,'$.object.status') as dispute_status,
+  get_json_object(a.data,'$.object.stage') as dispute_stage,
+  lower(a.name) as dispute_lifecycle,
+  a.account_id,
+  get_json_object(a.data,'$.object.dispute_id') as dispute_id
+from ods_looklook_mongodb_airwallex_chargeback_webhook a
+where a.pt = '${date}';
+
+-- 败诉
+@airwallex_chargeback_infos:=
+select
+  nvl(b.site_id,0) as site_id
+ ,nvl(b.site_name,'other') as site_name
+ ,dis.data_dt
+ ,dis.dispute_amount
+ ,dis.dispute_currency as currency_code
+ ,dis.dispute_fees
+ ,c.site_name as merchant_code
+ ,c.receive_date
+ ,dis.dispute_reason
+ ,dis.dispute_status
+ ,dis.dispute_stage
+ ,dis.dispute_lifecycle
+ ,case when lower(dispute_reason) rlike 'fraud' then '1'
+       when lower(dispute_reason) rlike 'not_recognized' then '1'
+       else '0'
+  end as if_fraud
+ ,case when dis.card_scheme rlike 'visa' then 'Visa'
+       when dis.card_scheme rlike 'mastercard' then 'MC'
+       else 'Others'
+  end as card_type
+ ,dis.payment_intent_id as transaction_id
+ ,b.order_id
+from
+(
+    select
+       t.data_dt,
+       t.payment_intent_id,
+       t.dispute_amount,
+       t.dispute_currency,
+       t.dispute_fees,
+       t.dispute_reason,
+       t.dispute_status,
+       t.dispute_stage,
+       t.dispute_lifecycle,
+       t.card_scheme
+      from
+      (
+          select
+             to_char(a.created_at,'yyyymmdd') as data_dt,
+             a.payment_intent_id,
+             a.dispute_amount as dispute_amount,
+             a.dispute_currency,
+             15 as dispute_fees,
+             a.dispute_reason,
+             a.dispute_status,
+             a.dispute_stage,
+             a.dispute_lifecycle,
+             a.card_scheme,
+             row_number() over (partition by dispute_id,created_at order by dispute_lifecycle) as rank_rn
+          from @airwallex_dispute_info a
+
+      ) t
+      where t.rank_rn = 1
+) dis
+left join dwd_mapping_txn_order_site b
+on (dis.payment_intent_id = b.txn_id and b.pt = '${date}' and b.pay_type = 'airwallex')
+left join (
+  select a.id,a.site_name,substring(replace(a.created_at_bj,'-',''),1,8) as receive_date
+  from ods_looklook_mongodb_airwallex_payments a
+  where a.pt='${date}' and a.status = 'SUCCEEDED' group by a.id,a.site_name,substring(replace(a.created_at_bj,'-',''),1,8)
+) c
+on (dis.payment_intent_id = c.id)
+;
+-- worldpay
+@worldpay_chargeback_info:=
+select
+   a.trans_date
+  ,a.payment_method
+  ,a.merchant_code
+  ,a.transaction_code
+  ,a.currency_code
+  ,a.amount
+  ,a.status as chargerback_stage
+  ,row_number() over (partition by a.transaction_code order by a.trans_date asc) as rn
+from ods_looklook_mongodb_worldpay_info a
+where a.pt = '${date}' and a.status in ('INFORMATION_REQUESTED','INFORMATION_SUPPLIED','CHARGED_BACK')
+;
+@wordpay_chargeback_detail:=
+select
+  to_char(a.trans_date,'yyyymmdd') as trans_date,
+  a.merchant_code,
+  nvl(t2.site_id,0) as site_id,
+  nvl(t2.site_name,'other') as site_name,
+  a.currency_code,
+  abs(a.amount) as chargeback_amount,
+  cct.currency_transform as currency_to_usd,
+  a.transaction_code as transaction_id,
+  t2.order_id,
+  a.chargerback_stage,
+  b.chargeback_description as reason,
+--  b.acquirer_reference,
+  'worldpay' as payment_type,
+  case when a.payment_method rlike 'ECMC' then 'MC' when a.payment_method rlike 'VISA' then 'Visa' else 'Others' end as card_type
+from @worldpay_chargeback_info a
+left join (
+  select
+     order_code
+    ,chargeback_code
+    ,chargeback_description
+    ,journal_type
+    ,split(a.acquirer_reference,' / ')[1] as acquirer_reference
+    ,row_number() over(distribute by order_code sort by a.chargeback_date,nvl(a.chargeback_description,'|') asc) as rn
+  from ods_looklook_mongodb_worldpay_chargeback_info a
+  where pt=max_pt('ods_looklook_mongodb_worldpay_chargeback_info') and a.chargeback_description is not null
+
+) b
+on a.transaction_code=b.order_code and b.rn=1
+left join dwd_mapping_txn_order_site t2
+on a.transaction_code=t2.txn_id and t2.pay_type='worldpay' and t2.pt='${date}'
+left join dwd_com_currency_transform cct
+on to_char(a.trans_date,'yyyymmdd')=cct.data_dt and a.currency_code=cct.currency_code and cct.pt=max_pt('dwd_com_currency_transform')
+where a.rn = 1
+;
+-- airwallex 收入和退款
+@airwallex_received:=
+select
+   substring(replace(a.created_at_bj,'-',''),1,8) as trans_date
+  ,a.site_name as merchant_code
+  ,nvl(b.site_id,0) as site_id
+  ,nvl(b.site_name,'other') as site_name
+  ,a.currency as currency_code
+  ,a.amount
+  ,a.method
+  ,case when a.method rlike 'visa' then 'Visa'
+        when a.method rlike 'mastercard' then 'MC'
+        else 'Others'
+  end as card_type,
+  b.order_id
+from ods_looklook_mongodb_airwallex_payments a
+left join dwd_mapping_txn_order_site b
+on (a.id = b.txn_id and b.pt = '${date}' and b.pay_type = 'airwallex')
+where a.pt = '${date}' and substring(replace(a.created_at_bj,'-',''),1,8)<='${date}' and a.status = 'SUCCEEDED'
+;
+@airwallex_refunds:=
+select
+   substring(replace(a.created_at_bj,'-',''),1,8) as trans_date
+  ,a.site_name as merchant_code
+  ,nvl(b.site_id,0) as site_id
+  ,nvl(b.site_name,'other') as site_name
+  ,a.currency as currency_code
+  ,a.amount
+  ,c.method
+  ,case when c.method rlike 'visa' then 'Visa'
+        when c.method rlike 'mastercard' then 'MC'
+        else 'Others'
+  end as card_type,
+  b.order_id
+from ods_looklook_mongodb_airwallex_refunds a
+left join dwd_mapping_txn_order_site b
+on (a.payment_intent_id = b.txn_id and b.pt = '${date}' and b.pay_type = 'airwallex')
+left join (select a.id,a.method from ods_looklook_mongodb_airwallex_payments a where a.pt = '${date}' group by a.id,a.method) c
+on (a.payment_intent_id = c.id)
+where a.pt = '${date}' and substring(replace(a.created_at_bj,'-',''),1,8)<='${date}' and a.status = 'SUCCEEDED'
+;
+
+@airwallex_received_refunds:=
+select
+   ar.trans_date
+  ,ar.merchant_code
+  ,ar.currency_code
+  ,ar.site_id
+  ,ar.site_name
+  ,ar.card_type
+  ,sum(ar.amount) as payments_received
+  ,count(distinct ar.order_id) as payment_trans_cnt
+  ,0 as refunds
+  ,0 as refunds_trans_count
+from @airwallex_received ar
+group by
+  ar.trans_date
+ ,ar.merchant_code
+ ,ar.currency_code
+ ,ar.site_id
+ ,ar.site_name
+ ,ar.card_type
+union all
+select
+   ar.trans_date
+  ,ar.merchant_code
+  ,ar.currency_code
+  ,ar.site_id
+  ,ar.site_name
+  ,ar.card_type
+  ,0 as payments_received
+  ,0 as payment_trans_cnt
+  ,sum(ar.amount) as refunds
+  ,count(distinct ar.order_id) as refunds_trans_count
+from @airwallex_refunds ar
+group by
+  ar.trans_date
+ ,ar.merchant_code
+ ,ar.currency_code
+ ,ar.site_id
+ ,ar.site_name
+ ,ar.card_type
+;
+-- wd 收入 退款
+@worldpay_received_refunds:=
+select
+    to_char(t1.trans_date,'yyyymmdd') as trans_date,
+    t1.merchant_code,
+    t1.currency_code,
+    nvl(t2.site_id,0) as site_id,
+    nvl(t2.site_name,'other') as site_name,
+    case when t1.payment_method rlike 'ECMC' then 'MC' when t1.payment_method rlike 'VISA' then 'Visa' else 'Others' end as card_type,
+    sum(case when t1.status in ('CAPTURED') then t1.amount end) as payments_received,
+    count(distinct case when t1.status='CAPTURED' then t1.transaction_code end) as payment_trans_cnt,
+    sum(case when t1.status in ('REFUNDED') then t1.amount end ) as refunds,
+    count(distinct case when t1.status in('REFUNDED') then t1.transaction_code end ) as refunds_trans_count
+from ods_looklook_mongodb_worldpay_info t1
+left join dwd_mapping_txn_order_site t2
+on t1.transaction_code=t2.txn_id and t2.pay_type='worldpay' and t2.pt='${date}'
+where t1.status in ('CAPTURED','REFUNDED') and t1.pt = '${date}'
+group by
+    to_char(t1.trans_date,'yyyymmdd'),
+    t1.merchant_code,
+    t1.currency_code,
+    nvl(t2.site_id,0),
+    nvl(t2.site_name,'other'),
+    case when t1.payment_method rlike 'ECMC' then 'MC' when t1.payment_method rlike 'VISA' then 'Visa' else 'Others' end
+;
+
+
+-- pacypay
+@pacypay_order_info_pre:=
+  select
+     t3.order_id
+    ,t2.merchant_no as merchant_code
+    ,t2.transaction_id as merchantno
+    ,nvl(t3.site_id,0) as site_id
+    ,nvl(t3.site_name,'other') as  site_name
+    ,'a' as type
+  from
+  (select
+        distinct
+        merchant_no,
+        currency,
+        unique_id,
+        transaction_id
+     from ods_looklook_mongodb_pacypay_transaction nt1
+     where nt1.pt = '${date}' and nt1.trade_status='SUCCESS'
+  ) t2
+  left join  dwd_mapping_txn_order_site t3
+  on t2.transaction_id=t3.txn_id and t3.site_type in (1,12) and t3.pt='${date}' and t3.pay_type='pacypay'
+  union all
+  select
+     t3.order_id
+    ,t2.merchant_no as merchant_code
+    ,t2.transaction_id as merchantno
+    ,nvl(t3.site_id,0) as site_id
+    ,nvl(t3.site_name,'other') as  site_name
+    ,'b' as type
+  from (
+      select distinct
+         merchant_no,
+         currency,
+         unique_id,
+         transaction_id
+    from ods_looklook_mongodb_pacypay_transaction nt1
+    where nt1.pt = '${date}' and nt1.trade_status='SUCCESS'
+  ) t2
+  left join dwd_mapping_txn_order_site t3
+  on t2.unique_id=t3.unique_id and t3.site_type in (2,5,3) and t3.pt='${date}' and t3.pay_type='pacypay'
+;
+
+
+@data_rank:=
+select a.*,rank() over (partition by  merchantno order by nvl(order_id,'zzzzzzzzzz') asc) as rank_code
+from @pacypay_order_info_pre a;
+
+@pacypay_order_info:=
+select tb1.order_id,tb1.site_id,tb1.site_name,tb1.merchantno
+from
+(
+      select
+       tb1.order_id
+      ,tb1.merchant_code
+      ,tb1.site_id
+      ,tb1.site_name
+      ,tb1.merchantno
+    from @data_rank tb1
+    where tb1.rank_code = 1 and tb1.order_id is not null
+    union all
+    select
+       tb1.order_id
+      ,tb1.merchant_code
+      ,tb1.site_id
+      ,tb1.site_name
+      ,tb1.merchantno
+    from
+    (
+        select t.*,rank() over (partition by  merchantno order by t.type) as rank_code_n
+        from @data_rank t
+        where t.rank_code = 1 and t.order_id is  null
+    ) tb1
+    where tb1.rank_code_n = 1
+) tb1
+group by tb1.order_id,tb1.site_id,tb1.site_name,tb1.merchantno
+;
+
+@pacypay_chargeback_detail:=
+select
+  to_char(a.chargeback_time,'yyyymmdd') as trans_date,
+  a.merchant_no as merchant_code,
+  nvl(b.site_id,0) as site_id,
+  nvl(b.site_name,'other') as site_name,
+  a.currency_code,
+  a.chargeback_amount as chargeback_amount,
+  cct.currency_transform as currency_to_usd,
+  a.transaction_id,
+  b.order_id,
+  a.chargeback_status as chargerback_stage,
+  a.remark as reason,
+  'pacypay' as payment_type,
+  'Others' as card_type
+from
+(
+    select
+      b1.transaction_id,
+      regexp_replace(b1.remark,'[^\u0000-\u00FF]','') as remark,
+      b1.port_status,
+      b1.chargeback_id,
+      row_number() over (partition by b1.transaction_id order by b1.chargeback_time asc) as rn,
+      b1.chargeback_time,
+      b1.merchant_no,
+      b1.chargeback_status,
+      nvl(b1.chargeback_currency,b1.currency) as currency_code,
+      nvl(b1.chargeback_amount,b1.amount) as chargeback_amount
+    from ods_looklook_mongodb_pacypay_transaction  b1 where b1.pt = '${date}' and b1.port_status = 'chargeback'
+) a
+inner join @pacypay_order_info b
+on (a.transaction_id = b.merchantno and a.rn = 1)
+left join dwd_com_currency_transform cct
+on (to_char(a.chargeback_time,'yyyymmdd') = cct.data_dt and a.currency_code = cct.currency_code and cct.pt = '${date}')
+;
+--pacypay 收入和退款
+@pacypay_received_refunds:=
+select
+  a.trans_date,
+  a.merchant_no as merchant_code,
+  a.currency as currency_code,
+  nvl(b.site_id,0) as site_id,
+  nvl(b.site_name,'other') as site_name,
+  'Others' as card_type,
+  sum(case when a.trans_type in ('received') then a.amount end) as payments_received,
+  count(distinct case when a.trans_type='received' then a.transaction_id end) as payment_trans_cnt,
+  sum(case when a.trans_type in ('refund') then a.amount end ) as refunds,
+  count(distinct case when a.trans_type in('refund') then a.transaction_id end ) as refunds_trans_count
+from
+(
+    select
+      to_char(cc.trade_time,'yyyymmdd') as trans_date,
+      cc.merchant_no,
+      cc.transaction_id,
+      cc.currency,
+      cc.amount,
+      'received' as trans_type
+    from ods_looklook_mongodb_pacypay_transaction cc
+    where cc.pt = '${date}' and cc.port_status = 'trans' and cc.trade_status = 'SUCCESS'
+    union all
+    select
+      to_char(cc.refund_time,'yyyymmdd') as trans_date,
+      cc.merchant_no,
+      cc.transaction_id,
+      cc.currency,
+      cc.refund_amount,
+      'refund' as trans_type
+    from ods_looklook_mongodb_pacypay_transaction cc
+    where cc.pt = '${date}' and cc.port_status = 'refund' and cc.trade_status = 'SUCCESS' and cc.refund_status = '3'
+) a
+inner join @pacypay_order_info b
+on (a.transaction_id = b.merchantno)
+group by
+  a.trans_date,
+  a.merchant_no,
+  a.currency,
+  nvl(b.site_id,0),
+  nvl(b.site_name,'other')
+;
+
+-- cardpay
+@cardpay_trans_info:=
+select
+  get_json_object(a.merchant_order,'$.id') as checkout_id,
+  get_json_object(a.payment_data,'$.id') as trans_id,
+  get_json_object(a.payment_data,'$.amount') as trans_amount,
+  get_json_object(a.payment_data,'$.created') as trans_date,
+  get_json_object(a.payment_data,'$.currency') as currency_code,
+  get_json_object(a.payment_data,'$.status') as trans_status,
+  get_json_object(a.payment_data,'$.decline_reason') as decline_reason,
+  get_json_object(a.payment_data,'$.decline_code') as decline_code,
+  get_json_object(a.card_account,'$.issuing_country_code') as card_issue_country,
+  get_json_object(a.card_account,'$.masked_pan') as card_no,
+  case when get_json_object(a.card_account,'$.masked_pan') like '4%' then 'Visa' when get_json_object(a.card_account,'$.masked_pan') like '2%' or get_json_object(a.card_account,'$.masked_pan') like '5%' then 'MC' else 'Others' end card_type,
+  a.terminal_code as merchant_code
+from ods_looklook_mongodb_cardpay_payments a
+where a.pt = '${date}'
+;
+
+@cardpay_refund_info:=
+select
+   get_json_object(a.merchant_order,'$.id') as order_on,
+   get_json_object(a.refund_data,'$.id') as refund_id,
+   get_json_object(a.refund_data,'$.amount') as refund_amount,
+   get_json_object(a.refund_data,'$.created') as refund_date,
+   get_json_object(a.refund_data,'$.currency') as currency_code,
+   get_json_object(a.refund_data,'$.decline_code') as decline_code,
+   get_json_object(a.refund_data,'$.decline_reason') as decline_reason,
+   get_json_object(a.refund_data,'$.status') as trans_status,
+   get_json_object(a.payment_data,'$.id') as trans_id,
+   get_json_object(a.card_account,'$.card.issuing_country_code') as card_issue_country,
+   get_json_object(a.card_account,'$.card.masked_pan') as card_no,
+   case when get_json_object(a.card_account,'$.card.masked_pan') like '4%' then 'Visa' when get_json_object(a.card_account,'$.masked_pan') like '2%' or get_json_object(a.card_account,'$.masked_pan') like '5%' then 'MC' else 'Others' end card_type,
+   a.terminal_code as merchant_code
+from ods_looklook_mongodb_cardpay_refunds a
+where a.pt = '${date}';
+
+
+@cardpay_trans_infos:=
+select
+   a.trans_id
+  ,a.trans_amount
+  ,to_char(dateadd(format_shopify_date(a.trans_date),-8,'hh'),'yyyymmdd') as trans_date
+  ,a.currency_code
+  ,a.card_issue_country
+  ,a.card_no
+  ,a.card_type
+  ,a.merchant_code
+from @cardpay_trans_info a
+where a.trans_status = 'COMPLETED';
+
+@cardpay_charged_back_info:=
+select
+   get_json_object(a.merchant_order,'$.id') as order_on,
+   get_json_object(a.payment_data,'$.amount') as charged_back_amount,
+   callback_time as charged_back_date,
+   get_json_object(a.payment_data,'$.currency') as currency_code,
+   get_json_object(a.payment_data,'$.status') as status,
+   get_json_object(a.payment_data,'$.id') as trans_id,
+   get_json_object(a.card_account,'$.masked_pan') as card_no
+from ods_looklook_mongodb_cardpay_webhook_data a
+where a.pt = '${date}' and get_json_object(a.payment_data,'$.status') = 'CHARGED_BACK';
+
+@cardpay_chargeback_detail:=
+select
+   to_char(dateadd(format_shopify_date(a.charged_back_date),-8,'hh'),'yyyymmdd') as trans_date,
+   b.merchant_code as merchant_code,
+   nvl(c.site_id,0) as site_id,
+   nvl(c.site_name,'other') as site_name,
+   a.currency_code,
+   decimal(a.charged_back_amount) as chargeback_amount,
+   cct.currency_transform as currency_to_usd,
+   a.trans_id as transaction_id,
+   c.order_id,
+   a.status as chargerback_stage,
+   '' as reason,
+   'cardpay' as payment_type,
+   b.card_type as card_type
+from @cardpay_charged_back_info a
+inner join @cardpay_trans_infos b
+on (a.trans_id = b.trans_id)
+left join dwd_mapping_txn_order_site c
+on (a.trans_id = c.txn_id and c.pay_type = 'cardpay' and c.pt = '${date}')
+left join dwd_com_currency_transform cct
+on (a.currency_code = cct.currency_code and to_char(dateadd(format_shopify_date(a.charged_back_date),-8,'hh'),'yyyymmdd') = cct.data_dt and cct.pt = '${date}')
+;
+-- 收入和退款
+@cardpay_received_refunds:=
+select
+  tb1.trans_date as trans_date,
+  tb1.currency_code,
+  tb1.merchant_code,
+  tb1.site_id,
+  tb1.site_name,
+  tb1.card_type,
+  sum(tb1.payments_received) as payments_received,
+  sum(tb1.payment_trans_cnt) as payment_trans_cnt,
+  sum(tb1.refunds) as refunds,
+  sum(tb1.refunds_trans_count) as refunds_trans_count
+from
+(
+    select
+        strdatetime_to_strdate(a.trans_date) as trans_date,
+        a.merchant_code,
+        a.currency_code,
+        nvl(b.site_id,0) as site_id,
+        nvl(b.site_name,'other') as site_name,
+        a.card_type,
+        sum(a.trans_amount) as payments_received,
+        count(distinct a.trans_id) as payment_trans_cnt,
+        0 as refunds,
+        0 as refunds_trans_count
+    from @cardpay_trans_info a
+    left join dwd_mapping_txn_order_site b
+    on (a.trans_id = b.txn_id and b.pay_type = 'cardpay' and b.pt = '${date}')
+    where a.trans_status in ('COMPLETED','REFUNDED')
+    group by
+      strdatetime_to_strdate(a.trans_date),
+      a.merchant_code,
+      a.currency_code,
+      nvl(b.site_id,0),
+      nvl(b.site_name,'other'),
+      a.card_type
+    union all
+    select
+        strdatetime_to_strdate(a.refund_date) as trans_date,
+        a.merchant_code,
+        a.currency_code,
+        nvl(b.site_id,0) as site_id,
+        nvl(b.site_name,'other') as site_name,
+        a.card_type,
+        0 as payments_received,
+        0 as payment_trans_cnt,
+        sum(a.refund_amount) as refunds,
+        count(distinct a.trans_id) as refunds_trans_count
+    from @cardpay_refund_info a
+    left join dwd_mapping_txn_order_site b
+    on (a.trans_id = b.txn_id and b.pay_type = 'cardpay' and b.pt = '${date}')
+    where a.trans_status in ('COMPLETED')
+    group by
+      strdatetime_to_strdate(a.refund_date),
+      a.merchant_code,
+      a.currency_code,
+      nvl(b.site_id,0),
+      nvl(b.site_name,'other'),
+      a.card_type
+) tb1
+group by
+  tb1.card_type,
+  tb1.site_id,
+  tb1.site_name,
+  tb1.currency_code,
+  tb1.merchant_code,
+  tb1.trans_date
+;
+
+
+
+-- ebanx 目前没有拒付和退款数据
+
+
+--credorax
+@credorax_receive_info:=
+select
+  a.request_id,min(a.card_scheme) as card_type,a.payment_id
+from ods_looklook_mongodb_credorax_processing_activity a
+where a.pt = '${date}' and a.transaction_type = 'Purchase'
+group by a.request_id,a.payment_id
+;
+@credorax_chargeback_info:=
+select
+  *
+from
+(
+    select
+    a.posting_date as transaction_date,
+    a.mid as merchant_code,
+    a.cbk_amount as transaction_amount,
+    a.cbk_currency as currency_code,
+    a.transaction_type,
+    a.orig_request_id as request_id,
+    a.payment_id,
+    a.reason_desc,
+    row_number() over (partition by a.orig_request_id order by a.posting_date asc) as rn
+  from ods_looklook_mongodb_credorax_chargeback_activity a
+  where a.pt = '${date}'
+) t
+where t.rn = 1  --只取最开始的一笔
+;
+
+@credorax_chargeback_detail:=
+select
+  a.transaction_date as trans_date,
+  a.merchant_code,
+  nvl(b.site_id,0) as site_id,
+  nvl(b.site_name,'other') as site_name,
+  a.currency_code,
+  a.transaction_amount as chargeback_amount,
+  cct.currency_transform as currency_to_usd,
+  a.request_id as transaction_id,
+  b.order_id,
+  a.transaction_type as chargerback_stage,
+  a.reason_desc as reason,
+  'credorax' as payment_type,
+  case when c.card_type rlike 'Mastercard' then 'MC' when c.card_type rlike 'Visa' then 'Visa' else 'Others' end as card_type
+from @credorax_chargeback_info a
+left join dwd_mapping_txn_order_site b
+on ((a.request_id = b.txn_id) and b.pt = '${date}' and b.pay_type='credorax')
+left join dwd_com_currency_transform cct
+on (a.transaction_date = cct.data_dt and a.currency_code = cct.currency_code and cct.pt = '${date}')
+left join @credorax_receive_info c
+on (a.request_id = c.request_id)
+;
+--收入 和退款
+-- 剔除掉取消收款的交易
+@credorax_processing_activity:=
+select
+   a.request_id,
+   a.card_scheme,
+   a.orig_transaction_amount as trans_amount,
+   a.orig_transaction_currency as currency_code,
+   a.mid as merchant_code,
+   case when length(regexp_replace(a.posting_date,'[^0-9]',''))=8 then regexp_replace(a.posting_date,'[^0-9]','')
+        else concat(substring(regexp_replace(a.posting_date,'[^0-9]',''),1,6),'0',substring(regexp_replace(a.posting_date,'[^0-9]',''),7,1))
+   end as transaction_date,
+   'receive' as trans_type
+from ods_looklook_mongodb_credorax_processing_activity a
+left anti join (
+  select
+     b.payment_id
+  from ods_looklook_mongodb_credorax_processing_activity b where b.pt = '${date}' and b.transaction_type='Purchase Reversal' group by b.payment_id
+) b
+on (a.payment_id = b.payment_id)
+where a.pt = '${date}' and a.transaction_type = 'Purchase'
+union all
+select
+   c.request_id,
+   a.card_scheme,
+   a.orig_transaction_amount as trans_amount,
+   a.orig_transaction_currency as currency_code,
+   a.mid as merchant_code,
+   case when length(regexp_replace(a.posting_date,'[^0-9]',''))=8 then regexp_replace(a.posting_date,'[^0-9]','')
+        else concat(substring(regexp_replace(a.posting_date,'[^0-9]',''),1,6),'0',substring(regexp_replace(a.posting_date,'[^0-9]',''),7,1))
+   end as transaction_date,
+   'refund' as trans_type
+from ods_looklook_mongodb_credorax_processing_activity a
+left anti join (
+  select
+     b.payment_id
+  from ods_looklook_mongodb_credorax_processing_activity b where b.pt = '${date}' and b.transaction_type='Refund Reversal' group by b.payment_id
+) b
+on (a.payment_id = b.payment_id)
+left join @credorax_receive_info c
+on (a.payment_id = c.payment_id)
+where a.pt = '${date}' and a.transaction_type = 'Refund'
+;
+
+@credorax_received_refunds:=
+select
+  a.transaction_date as trans_date,
+  a.merchant_code,
+  a.currency_code,
+  nvl(b.site_id,0) as site_id,
+  nvl(b.site_name,'other') as site_name,
+  case when a.card_scheme rlike 'Mastercard' then 'MC' when a.card_scheme rlike 'Visa' then 'Visa' else 'Others' end as card_type,
+  sum(case when a.trans_type in ('receive') then a.trans_amount end) as payments_received,
+  count(distinct case when a.trans_type='receive' then a.request_id end) as payment_trans_cnt,
+  sum(case when a.trans_type in ('refund') then a.trans_amount end ) as refunds,
+  count(distinct case when a.trans_type in('refund') then a.request_id end ) as refunds_trans_count
+from @credorax_processing_activity a
+left join dwd_mapping_txn_order_site b
+on ((a.request_id = b.txn_id) and b.pt = '${date}' and b.pay_type='credorax')
+group by
+  a.transaction_date,
+  a.merchant_code,
+  a.currency_code,
+  nvl(b.site_id,0),
+  nvl(b.site_name,'other'),
+  case when a.card_scheme rlike 'Mastercard' then 'MC' when a.card_scheme rlike 'Visa' then 'Visa' else 'Others' end
+;
+
+
+-- 晶粒
+@xborder_chargeback_detail:=
+select
+  tb1.trans_date as trans_date,
+  tb1.merchant_code as merchant_code,
+  nvl(b.site_id,0) as site_id,
+  nvl(b.site_name,0) as site_name,
+  tb1.currency_code,
+  tb1.transaction_amount as chargeback_amount,
+  cct.currency_transform as currency_to_usd,
+  tb1.transaction_code as transaction_id,
+  b.order_id,
+  tb1.transaction_status as chargerback_stage,
+  '' as reason,
+  'xborder' as payment_type,
+  'Others' as card_type
+from
+(
+    select
+      StrDatetime_to_StrDate(a.date_complete) as trans_date,
+      a.merchant_id as merchant_code,
+      amount as transaction_amount,
+      a.currency as currency_code,
+      concat(a.transaction_type,'-',a.transaction_status) as transaction_type,
+      a.order_number as transaction_code,
+      a.transaction_status,
+      row_number() over (partition by a.order_number order by a.date_complete asc) as rn
+  from ods_looklook_mongodb_gltech_transactions a
+  where a.pt = '${date}' and a.transaction_type = 'chargeback'
+) tb1
+left join dwd_mapping_txn_order_site b
+on (tb1.transaction_code = b.txn_id and b.pay_type = 'xborder' and b.pt = '${date}')
+left join dwd_com_currency_transform cct
+on (tb1.trans_date = cct.data_dt and tb1.currency_code = cct.currency_code and cct.pt = '${date}')
+where tb1.rn =1
+;
+@xborder_received_refunds:=
+select
+    StrDatetime_to_StrDate(a.date_pay) as trans_date,
+    a.merchant_id as merchant_code,
+    a.currency as currency_code,
+    nvl(b.site_id,0) as site_id,
+    nvl(b.site_name,'other') as site_name,
+    'Others'  as card_type,
+    sum(case when a.transaction_type in ('sale','capture') then a.amount end) as payments_received,
+    count(distinct case when a.transaction_type in ('sale','capture') then a.order_number end) as payment_trans_cnt,
+    sum(case when a.transaction_type in ('refund') then a.amount end ) as refunds,
+    count(distinct case when a.transaction_type in('refund') then a.order_number end ) as refunds_trans_count
+from ods_looklook_mongodb_gltech_transactions a
+left join dwd_mapping_txn_order_site b
+on (a.order_number = b.txn_id and b.pay_type = 'xborder' and b.pt = '${date}')
+where a.pt = '${date}' and a.transaction_status = 'Approved' and a.transaction_type in ('sale','capture','refund')
+group by
+    StrDatetime_to_StrDate(a.date_pay),
+    a.merchant_id,
+    a.currency,
+    nvl(b.site_id,0),
+    nvl(b.site_name,'other')
+;
+
+
+@charge_back_detail :=
+select
+      t.trans_date,
+      t.site_id,
+      t.site_name,
+      t.order_id,
+      t.transaction_id,
+      t.merchant_code,
+      t.chargeback_amount,
+      t.currency_code,
+      t.currency_to_usd,
+      t.chargerback_stage,
+      t.reason,
+      t.payment_type,
+      t.card_type
+from
+(
+  select
+      aci.data_dt as trans_date,
+      aci.site_id,
+      aci.site_name,
+      aci.order_id,
+      aci.transaction_id,
+      aci.merchant_code as merchant_code,
+      decimal(aci.dispute_amount) as chargeback_amount,
+      aci.currency_code,
+      cct.currency_transform as currency_to_usd,
+      aci.dispute_status as chargerback_stage,
+      aci.dispute_reason as reason,
+      'airwallex' as payment_type,
+      aci.card_type
+    from @airwallex_chargeback_infos aci
+    left join dwd_com_currency_transform cct
+    on (aci.data_dt = cct.data_dt and aci.currency_code = cct.currency_code and cct.pt = '${date}')
+    union all
+    select
+      a.trans_date,
+      a.site_id,
+      a.site_name,
+      a.order_id,
+      a.transaction_id,
+      a.merchant_code,
+      a.chargeback_amount,
+      a.currency_code,
+      a.currency_to_usd,
+      a.chargerback_stage,
+      a.reason,
+      a.payment_type,
+      a.card_type
+    from @wordpay_chargeback_detail a
+    union all
+    select
+      a.trans_date,
+      a.site_id,
+      a.site_name,
+      a.order_id,
+      a.transaction_id,
+      a.merchant_code,
+      a.chargeback_amount,
+      a.currency_code,
+      a.currency_to_usd,
+      a.chargerback_stage,
+      a.reason,
+      a.payment_type,
+      a.card_type
+    from @cardpay_chargeback_detail a
+    union all
+    select
+      a.trans_date,
+      a.site_id,
+      a.site_name,
+      a.order_id,
+      a.transaction_id,
+      a.merchant_code,
+      a.chargeback_amount,
+      a.currency_code,
+      a.currency_to_usd,
+      a.chargerback_stage,
+      a.reason,
+      a.payment_type,
+      a.card_type
+    from @pacypay_chargeback_detail a
+    union all
+    select
+      a.trans_date,
+      a.site_id,
+      a.site_name,
+      a.order_id,
+      a.transaction_id,
+      a.merchant_code,
+      decimal(a.chargeback_amount) as chargeback_amount,
+      a.currency_code,
+      a.currency_to_usd,
+      a.chargerback_stage,
+      a.reason,
+      a.payment_type,
+      a.card_type
+    from @credorax_chargeback_detail a
+    union all
+    select
+      a.trans_date,
+      a.site_id,
+      a.site_name,
+      a.order_id,
+      a.transaction_id,
+      a.merchant_code,
+      decimal(a.chargeback_amount) as chargeback_amount,
+      a.currency_code,
+      a.currency_to_usd,
+      a.chargerback_stage,
+      a.reason,
+      a.payment_type,
+      a.card_type
+    from @xborder_chargeback_detail a
+) t
+;
+
+@chargeback_summary:=
+select
+  a.trans_date,
+  a.merchant_code,
+  a.currency_code,
+  a.site_id,
+  a.site_name,
+  a.card_type,
+  a.payment_type,
+  sum(a.chargeback_amount) as chargeback_amount,
+  count(distinct a.transaction_id) as chargeback_trans_cnt
+from @charge_back_detail a
+group by
+  a.trans_date,
+  a.merchant_code,
+  a.currency_code,
+  a.site_id,
+  a.site_name,
+  a.card_type,
+  a.payment_type
+;
+
+@receive_refund_summary:=
+select
+  a.trans_date,
+  a.merchant_code,
+  a.currency_code,
+  a.site_id,
+  a.site_name,
+  a.card_type,
+  a.payments_received,
+  a.payment_trans_cnt,
+  a.refunds,
+  a.refunds_trans_count,
+  'airwallex' as payment_type
+from @airwallex_received_refunds a
+union all
+select
+  a.trans_date,
+  a.merchant_code,
+  a.currency_code,
+  a.site_id,
+  a.site_name,
+  a.card_type,
+  a.payments_received,
+  a.payment_trans_cnt,
+  a.refunds,
+  a.refunds_trans_count,
+  'worldpay' as payment_type
+from @worldpay_received_refunds a
+union all
+select
+  a.trans_date,
+  a.merchant_code,
+  a.currency_code,
+  a.site_id,
+  a.site_name,
+  a.card_type,
+  a.payments_received,
+  a.payment_trans_cnt,
+  a.refunds,
+  a.refunds_trans_count,
+  'pacypay' as payment_type
+from @pacypay_received_refunds a
+union all
+select
+  a.trans_date,
+  a.merchant_code,
+  a.currency_code,
+  a.site_id,
+  a.site_name,
+  a.card_type,
+  a.payments_received,
+  a.payment_trans_cnt,
+  a.refunds,
+  a.refunds_trans_count,
+  'credorax' as payment_type
+from @credorax_received_refunds a
+union all
+select
+  a.trans_date,
+  a.merchant_code,
+  a.currency_code,
+  a.site_id,
+  a.site_name,
+  a.card_type,
+  a.payments_received,
+  a.payment_trans_cnt,
+  a.refunds,
+  a.refunds_trans_count,
+  'cardpay' as payment_type
+from @cardpay_received_refunds a
+union all
+select
+  a.trans_date,
+  a.merchant_code,
+  a.currency_code,
+  a.site_id,
+  a.site_name,
+  a.card_type,
+  a.payments_received,
+  a.payment_trans_cnt,
+  a.refunds,
+  a.refunds_trans_count,
+  'xborder' as payment_type
+from @xborder_received_refunds a
+;
+
+insert overwrite table app_looklook_rpt_all_credit_card_channel_risk_data_info partition(pt = '${date}')
+select
+  t.trans_date,
+  t.merchant_code,
+  t.currency_code,
+  t.site_id,
+  t.site_name,
+  t.card_type,
+  nvl(t.payments_received,0) as payments_received,
+  nvl(t.payment_trans_cnt,0) as payment_trans_cnt,
+  abs(nvl(t.refunds,0)) as refunds,
+  nvl(t.refunds_trans_count,0) as refunds_trans_count,
+  abs(nvl(t.chargeback_amount,0)) as chargeback_amount,
+  nvl(t.chargeback_trans_cnt,0) as chargeback_trans_cnt,
+  cct.currency_transform as currency_to_usd,
+  cct.currency_transform_cny as currency_to_cny,
+  t.payment_type
+from
+(
+    select
+      t.trans_date,
+      t.merchant_code,
+      t.currency_code,
+      t.site_id,
+      t.site_name,
+      t.card_type,
+      t.payment_type,
+      sum(t.payments_received) as payments_received,
+      sum(t.payment_trans_cnt) as payment_trans_cnt,
+      sum(t.refunds) as refunds,
+      sum(t.refunds_trans_count) as refunds_trans_count,
+      sum(t.chargeback_amount) as chargeback_amount,
+      sum(t.chargeback_trans_cnt) as chargeback_trans_cnt
+    from
+    (
+        select
+          a.trans_date,
+          a.merchant_code,
+          a.currency_code,
+          a.site_id,
+          a.site_name,
+          a.card_type,
+          a.payments_received,
+          a.payment_trans_cnt,
+          a.refunds,
+          a.refunds_trans_count,
+          0 as chargeback_amount,
+          0 as chargeback_trans_cnt,
+          a.payment_type
+        from @receive_refund_summary a
+        union all
+        select
+          a.trans_date,
+          a.merchant_code,
+          a.currency_code,
+          a.site_id,
+          a.site_name,
+          a.card_type,
+          0 as payments_received,
+          0 as payment_trans_cnt,
+          0 as refunds,
+          0 as refunds_trans_count,
+          a.chargeback_amount as chargeback_amount,
+          a.chargeback_trans_cnt as chargeback_trans_cnt,
+          a.payment_type
+        from @chargeback_summary a
+    ) t
+    group by
+      t.trans_date,
+      t.merchant_code,
+      t.currency_code,
+      t.site_id,
+      t.site_name,
+      t.card_type,
+      t.payment_type
+) t
+left join dwd_com_currency_transform cct
+on (t.trans_date = cct.data_dt and t.currency_code = cct.currency_code and cct.pt='${date}')
+;

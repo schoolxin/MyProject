@@ -1,0 +1,96 @@
+@replace_sku_mapping:=
+select
+     distinct
+     d.logistics_no,
+     d.delivery_time,
+     d.site_order_no,
+     d.spu, -- 替换后的spu
+     d.sku, -- 替换后的spu
+     a.spu_no  as org_spu, -- 替换前的spu
+     a.sku_erp_id as org_sku -- 替换前的sku
+from (
+--wms反馈表
+    select logistics_no,site_order_no,spu,sku,sum(quantity)as ship_qty,delivery_time from opdc.ods_ferp_wms_delivery_order a
+    left join opdc.ods_ferp_wms_delivery_order_detail b on a.id = b.wms_delivery_order_id
+    where a.is_delete = 0 and b.is_delete = 0
+    group by site_order_no,spu,sku,delivery_time,logistics_no
+)d
+--关联发货汇总
+left join (
+    select site_order_no,spu,sku,replace_spu,replace_sku from (
+        select
+        a.site_order_no,a.spu,a.sku,a.replace_spu,a.replace_sku
+        from opdc.ods_ferp_erp_route_sku_order_summary a
+        left join opdc.ods_ferp_erp_route_sku_order_summary b
+        on a.replace_sku = b.sku and a.sku_order_summary_no = b.sku_order_summary_no and a.site_order_no = b.site_order_no and b.replace_sku <> a.replace_sku and b.replace_sku <> a.sku
+        where b.sku is null
+        union all
+        select
+        a.site_order_no,a.spu,a.sku,b.replace_spu,b.replace_sku
+        from opdc.ods_ferp_erp_route_sku_order_summary a
+        left join opdc.ods_ferp_erp_route_sku_order_summary b
+        on a.replace_sku = b.sku and a.sku_order_summary_no = b.sku_order_summary_no and a.site_order_no = b.site_order_no and b.replace_sku <> a.replace_sku and b.replace_sku <> a.sku
+        left join opdc.ods_ferp_erp_route_sku_order_summary c
+        on b.replace_sku = c.sku and b.sku_order_summary_no = c.sku_order_summary_no and b.site_order_no = c.site_order_no and b.replace_sku <> c.replace_sku and c.replace_sku <> b.sku
+        where b.sku is not null and c.sku is null and b.sale_qty-b.cancelled_qty <> 0
+        union all
+        select
+        a.site_order_no,a.spu,a.sku,c.replace_spu,c.replace_sku
+         from opdc.ods_ferp_erp_route_sku_order_summary a
+        left join opdc.ods_ferp_erp_route_sku_order_summary b
+        on a.replace_sku = b.sku and a.sku_order_summary_no = b.sku_order_summary_no and a.site_order_no = b.site_order_no and b.replace_sku <> a.replace_sku and b.replace_sku <> a.sku
+        left join opdc.ods_ferp_erp_route_sku_order_summary c
+        on b.replace_sku = c.sku and b.sku_order_summary_no = c.sku_order_summary_no and b.site_order_no = c.site_order_no and b.replace_sku <> c.replace_sku and c.replace_sku <> b.sku
+        left join opdc.ods_ferp_erp_route_sku_order_summary d
+        on c.replace_sku = d.sku and c.sku_order_summary_no = d.sku_order_summary_no and c.site_order_no = d.site_order_no and c.replace_sku <> d.replace_sku and d.replace_sku <> c.sku
+        where c.sku is not null and d.sku is null
+        union all
+        select
+        a.site_order_no,a.spu,a.sku,c.replace_spu,c.replace_sku
+         from opdc.ods_ferp_erp_route_sku_order_summary a
+        left join opdc.ods_ferp_erp_route_sku_order_summary b
+        on a.replace_sku = b.sku and a.sku_order_summary_no = b.sku_order_summary_no and a.site_order_no = b.site_order_no and b.replace_sku <> a.replace_sku and b.replace_sku <> a.sku
+        left join opdc.ods_ferp_erp_route_sku_order_summary c
+        on b.replace_sku = c.sku and b.sku_order_summary_no = c.sku_order_summary_no and b.site_order_no = c.site_order_no and b.replace_sku <> c.replace_sku and c.replace_sku <> b.sku
+        left join opdc.ods_ferp_erp_route_sku_order_summary d
+        on c.replace_sku = d.sku and c.sku_order_summary_no = d.sku_order_summary_no and c.site_order_no = d.site_order_no and c.replace_sku <> d.replace_sku and d.replace_sku <> c.sku
+        left join opdc.ods_ferp_erp_route_sku_order_summary e
+        on d.replace_sku = e.sku and c.sku_order_summary_no = e.sku_order_summary_no and d.site_order_no = e.site_order_no and d.replace_sku <> e.replace_sku and e.replace_sku <> d.sku
+        where d.sku is not null and e.sku is null
+    )
+    -- where site_order_no = 'ord-026600371' and sku = 27554501
+    group by site_order_no,spu,sku,replace_spu,replace_sku
+)c on c.replace_sku = d.sku and c.site_order_no = d.site_order_no
+--关联发货订单明细
+left join (
+    select site_order_no,org_spu,org_sku,sku,spu,order_no from (
+        select site_order_no,org_spu,org_sku,sku,spu,order_no,row_number() over(partition by site_order_no,org_spu,org_sku order by order_no desc) as rn  from opdc.ods_ferp_erp_route_delivery_order do
+        left join opdc.ods_ferp_erp_route_delivery_order_detail dod on dod.delivery_order_id = do.id
+        where  do.is_delete = 0 and dod.is_delete = 0
+    )where rn = 1
+)b on c.sku = b.sku and c.site_order_no = b.site_order_no
+--关联oms订单
+left join(
+    select order_no,order_id,spu_no,sku_erp_id
+    from opdc.ods_oms_order_order_detail ood
+    inner join opdc.ods_oms_order_order oo on oo.id = ood.order_id
+    where ood.is_delete = 0 and oo.is_delete = 0 and oo.order_status = 2 and oo.send_type = 0 and oo.channel = 1
+    union
+    select order_no,cast(order_id as string)as order_id,spu_no,sku_erp_id
+    from opdc.ods_oms_order_change_detail ocd
+    inner join opdc.ods_oms_order_order oo on oo.id = ocd.order_id
+    where ocd.is_delete = 0 and oo.is_delete = 0 and oo.order_status = 2 and oo.send_type = 0 and oo.channel = 1
+)a on b.org_sku = a.sku_erp_id and a.order_no = b.site_order_no;
+
+
+
+select
+  a.logistics_no,a.site_order_no,a.sku,count(distinct a.org_sku) as org_sku_count
+from @replace_sku_mapping a
+where a.sku <> a.org_sku
+group by a.logistics_no,a.site_order_no,a.sku
+
+having count(distinct a.org_sku)>1
+;
+
+--select * from @replace_sku_mapping tt where tt.logistics_no = '4207507092612927005483010003725723';

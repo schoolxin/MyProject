@@ -1,0 +1,33 @@
+--name:根据运单匹配订单编号
+--author:order
+--create time:2022-04-06 17:17
+select
+ do.logistics_no,
+ orders.order_no,
+ orders.site_order_id,
+ orders.site_order_no
+from opdc.ods_ferp_wms_delivery_order do
+left join opdc.ods_oms_order_order orders on orders.order_no = do.source_no
+where do.logistics_no in
+(
+'33995685404',
+	'SF1143156063543',
+	'SF1143156063543',
+	'6011122450862',
+	'CNB20492806',
+	'SF143156063625',
+	'33995662400',
+	'6011122183302',
+	'SF1139413869234',
+	'6011122915940',
+	'1716089300001',
+	'17160805',
+	'SF1143156063552',
+	'33995609432',
+	'17160767',
+	'33995608905',
+	'33995654604',
+	'33995655886',
+	'SF11431561669'
+)
+;

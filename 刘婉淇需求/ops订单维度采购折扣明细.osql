@@ -1,0 +1,244 @@
+@devalue_rate_pre:=
+select a.product as proudct_spu,max(a.rate) as rate,a.pt as data_dt
+from opdc.stock_rate a
+where substring(a.pt,1,6)<='${month}'
+group by a.product,a.pt
+union all
+select t.product as proudct_spu,max(t.rate) as rate,t.pt as data_dt
+from
+(
+  select
+    a.product,
+    a.rate,
+    a.pt
+  from
+  (
+    select a.product,a.pt,a.rate
+    from popopiedc.stock_rate a
+    where substring(a.pt,1,6)<='${month}'
+  ) a
+  left anti join (select b.product,b.pt from opdc.stock_rate b where substring(b.pt,1,6)<='${month}') b
+  on (a.product = b.product and a.pt =b.pt)
+) t
+group by t.product,t.pt
+;
+-- 用10月10号的减值率 弥补9.30到10.9号的
+@devalue_rate:=
+select
+ /* + mapjoin(dcc) */
+  dcc.data_dt
+ ,drp.proudct_spu
+ ,drp.rate
+from
+(
+  select
+    string(a.date_id) as data_dt
+  from dim_com_calender a
+  where a.date_id between '20210930' and '20211009'
+) dcc
+,
+(
+  select * from @devalue_rate_pre a where a.data_dt = '20211010'
+) drp
+union all
+select
+   drr.data_dt
+  ,drr.proudct_spu
+  ,drr.rate
+from @devalue_rate_pre drr
+;
+@spu_cost_info:=
+select
+      t.product_no,
+      t.choose_date,
+      t.choose_user_name,
+      t.system,
+      t.supply_price,
+      t.purchase_guide_max_price,
+      t.purchase_guide_min_price,
+      t.avg_purchase_price
+from
+(
+    select
+      t.product_no,
+      t.choose_date,
+      row_number() over (partition by t.product_no order by t.levels asc) as rn,
+      t.system,
+      t.supply_price,
+      t.purchase_guide_max_price,
+      t.purchase_guide_min_price,
+      t.choose_user_name,
+      t.avg_purchase_price
+    from
+    (
+      select
+        a.product_no,
+        a.choose_date as choose_date,
+        if(lower(nvl(a.system,'other'))='lms',1,2) as levels, --优先从lms系统取 取不到再从其他系统取
+        a.system,
+        a.supply_price,
+        a.purchase_guide_max_price,
+        a.purchase_guide_min_price,
+        a.first_choose_user_name as choose_user_name,
+        a.avg_purchase_price
+      from opdc.dim_spu a
+      union all
+      select
+        a.product_no,
+        a.choose_date as choose_date,
+        if(lower(nvl(a.system,'other'))='lms',1,2) as levels, --优先从lms系统取 取不到再从其他系统取
+        a.system,
+        a.supply_price,
+        a.purchase_guide_max_price,
+        a.purchase_guide_min_price,
+        a.first_choose_user_name as choose_user_name,
+        a.avg_purchase_price
+      from popopiedc.dim_spu a
+    ) t
+) t
+where t.rn =1
+ ;
+@order_info:=
+select
+  osp.*
+ ,case when ds.avg_purchase_price!=0 then avg_purchase_price
+       when ds.supply_price!=0 then supply_price
+       when ds.purchase_guide_max_price!=0 then purchase_guide_max_price
+       when ds.purchase_guide_min_price!=0 then purchase_guide_min_price
+  end as purchase_price
+from
+(
+    select
+      to_char(osp.paytime,'yyyymmdd') as order_date,
+      osp.spu_no,
+      osp.order_id,
+      osp.order_no,
+      ooa.site_id,
+      osp.order_amt,
+      sum(osp.sales_qty) as product_sale_cnt
+    from opdc.dwd_order_sales_process osp
+    inner join (
+          select b.order_id,b.site_id from opdc.dwd_order_order_appendix b group by b.order_id,b.site_id
+    ) ooa
+    on (osp.order_id = ooa.order_id)
+    where to_char(osp.paytime,'yyyymmdd')>='20211201' and osp.change_type = '下单'
+    and osp.order_id not in (select t.id from op_jxl.ods_erp_order_order t where  t.ishotplat = 1 and t.paytype = 0) --剔除网红手工订单
+    and osp.order_id not in (select cast(id as string) from opdc.ods_oms_order_order where order_type = 1)
+    group by
+      to_char(osp.paytime,'yyyymmdd'),
+      osp.spu_no,
+      osp.order_id,
+      osp.order_no,
+      ooa.site_id,
+      osp.order_amt
+    union all
+    --宝宝派
+    select
+      to_char(osp.paytime,'yyyymmdd') as order_date,
+      osp.spu_no,
+      osp.order_id,
+      osp.order_no,
+      ooa.site_id,
+      osp.order_amt,
+      sum(osp.sales_qty) as product_sale_cnt
+    from popopiedc.dwd_order_sales_process osp
+    inner join (
+          select b.order_id,b.site_id from popopiedc.dwd_order_order_appendix b group by b.order_id,b.site_id
+    ) ooa
+    on (osp.order_id = ooa.order_id)
+    where to_char(osp.paytime,'yyyymmdd')>='20211201' and osp.change_type = '下单'
+    --wuting add 排除掉网红订单
+    and osp.order_id not in (select cast(id as string) from popopiedc.ods_oms_order_order where order_type = 1)
+    group by
+      to_char(osp.paytime,'yyyymmdd'),
+      osp.spu_no,
+      osp.order_id,
+      osp.order_no,
+      ooa.site_id,
+      osp.order_amt
+) osp
+left join @spu_cost_info ds
+on (osp.spu_no = ds.product_no)
+;
+
+@order_info_product_stock_devalue_rate:=
+select
+   t.spu_no
+  ,t.order_id
+  ,t.order_no
+  ,t.order_amt
+  ,t.product_sale_cnt
+  ,t.site_id
+  ,t.rate
+  ,t.order_date as pay_date
+  ,t.lastest_devalue_date
+  ,t.purchase_price
+from
+(
+    select
+     oi.spu_no
+    ,oi.order_id
+    ,oi.order_no
+    ,oi.order_amt
+    ,oi.product_sale_cnt
+    ,oi.site_id
+    ,row_number() over (partition by oi.order_no,oi.order_id,oi.spu_no order by nvl(dr.data_dt,'99991231') desc) as rn
+    ,nvl(dr.rate,0) as rate
+    ,oi.order_date
+    ,dr.data_dt as lastest_devalue_date --最近一次的减值率日期
+    ,oi.purchase_price
+  from @order_info oi
+  left join @devalue_rate dr
+  on (oi.spu_no = dr.proudct_spu and oi.order_date>=dr.data_dt)
+) t
+where t.rn = 1
+;
+
+@mapping_erp_site_info:=
+select
+    t2.site_id,
+    t2.site_name,
+    t2.erp_site_id
+from
+(
+    select
+    t1.site_name,
+    t1.site_id,
+    t1.erp_site_id,
+    t1.status,
+    row_number() over (partition by t1.erp_site_id order by t1.status asc) as rn
+    from
+    (
+        select
+            a.site_name,
+            a.site_id,
+            case when b.site_type_id = 4 then a.cod_erp_site_id else a.erp_site_id end as erp_site_id,
+            b.status
+        from dwd_mapping_erp_site_id a
+        join ods_looklook_looklook_tb_site b
+        on (a.site_id = b.id and b.pt='${date}')
+        where a.pt='${date}'
+    ) t1
+) t2
+where t2.rn =1
+;
+insert overwrite table dwd_looklook_every_day_site_purchase_discount partition (pt = '${date}')
+select
+  sdr.spu_no as "spu"
+ ,sdr.order_id as "erp或oms订单ID"
+ ,sdr.order_no as "erp或oms订单编号"
+ ,sdr.pay_date as "订单日期"
+ ,sdr.product_sale_cnt as "销售数量"
+ ,sdr.rate as "最近一次减值比例"
+ ,sdr.lastest_devalue_date as "最近一次减值比例日期"
+ ,sdr.purchase_price as "采购成本"
+ ,purchase_price*sdr.product_sale_cnt*(1-sdr.rate) as "采购折扣"
+ ,esi.site_id as "ops站点ID"
+ ,esi.site_name as "ops站点名"
+from @order_info_product_stock_devalue_rate sdr
+inner join @mapping_erp_site_info esi
+on (esi.erp_site_id = sdr.site_id)
+--where sdr.pay_date between '20220101' and '20220131'
+;
+
+

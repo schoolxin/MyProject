@@ -1,0 +1,25 @@
+--name:paypal拒付率分析
+--author:order
+--create time:2022-02-07 18:42
+create table temp_paypal_dispute_info
+as
+select
+ a.transaction_id,
+ a.receive_amount_usd,
+ a.transaction_date,
+ '' as reason,
+ '' as dispute_channel,
+ '收款' as type
+from app_looklook_daily_rpt_paypal_dispute_info a
+where a.transaction_date between '20211201' and '20220131' and a.pt = max_pt('app_looklook_daily_rpt_paypal_dispute_info')
+union all
+select
+ a.transaction_id,
+ a.dispute_amount_usd,
+ a.dispute_create_date,
+ a.reason,
+ a.dispute_channel,
+ '拒付' as type
+from app_looklook_daily_rpt_paypal_dispute_info a
+where a.dispute_create_date between '20211201' and '20220131' and a.pt = max_pt('app_looklook_daily_rpt_paypal_dispute_info')
+;
