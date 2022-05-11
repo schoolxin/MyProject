@@ -117,6 +117,8 @@ select
   a.goods_name as goods_name,
   a.count,
   a.order_price_usd as order_price_usd,
+
+
   a.express_no,
   a.name,
   sum(a.order_price_usd) over ( partition by to_char(a.create_time,'yyyy-mm-dd') order by a.create_time asc) as total_amount,
