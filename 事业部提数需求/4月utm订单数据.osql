@@ -1,0 +1,16 @@
+create table tmp_order_infozqq as
+select
+a.order_id as "订单ID",
+a.order_sn as "订单编号",
+a.site_type as "站点类型",
+a.utm_source as "utm",
+a.site_id as "站点ID",
+a.site_name as "站点",
+a.currency_code as "币种",
+a.total_amount as "原币金额",
+b.currency_transform as "转美元汇率",
+b.currency_transform_cny as "转RMB汇率"
+from dwd_looklook_allsitetype_order_info a
+left join dwd_com_currency_transform b
+on (to_char(a.order_at,'yyyymmdd') = b.data_dt and a.currency_code = b.currency_code and b.pt = '${date}')
+where a.pt = '${date}' and length(trim(a.utm_source)) >0 and to_char(a.order_at,'yyyymm') = '202204' and financial_status = 'paid';
